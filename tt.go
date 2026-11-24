@@ -7,6 +7,7 @@ import "sync/atomic"
 // escrever no meio da leitura, o XOR não bate e a entrada é ignorada.
 //
 // dados: lance (20 bits) | nota+offset (18 bits) | profundidade (8) | tipo (2)
+//        | eval estática (16 bits, int16; evalNone = não calculada)
 
 const (
 	ttExact = iota + 1 // nota exata
@@ -16,11 +17,15 @@ const (
 
 const ttScoreOffset = 1 << 17
 
+// evalNone: sem eval estática (posição em xeque).
+const evalNone = -32768
+
 type ttEntry struct {
 	move  Move
 	score int
 	depth int
 	flag  int
+	eval  int
 }
 
 type TT struct {
@@ -46,14 +51,16 @@ func (t *TT) Clear() {
 	}
 }
 
-func packTT(m Move, score, depth, flag int) uint64 {
+func packTT(m Move, score, depth, flag, eval int) uint64 {
 	if depth < 0 {
 		depth = 0
 	}
 	if depth > 255 {
 		depth = 255
 	}
-	return uint64(m)&0xFFFFF | uint64(score+ttScoreOffset)&0x3FFFF<<20 | uint64(depth)<<38 | uint64(flag)<<46
+	eval = max(evalNone, min(32767, eval))
+	return uint64(m)&0xFFFFF | uint64(score+ttScoreOffset)&0x3FFFF<<20 | uint64(depth)<<38 | uint64(flag)<<46 |
+		uint64(uint16(int16(eval)))<<48
 }
 
 func unpackTT(d uint64) ttEntry {
@@ -62,6 +69,7 @@ func unpackTT(d uint64) ttEntry {
 		score: int(d>>20&0x3FFFF) - ttScoreOffset,
 		depth: int(d >> 38 & 0xFF),
 		flag:  int(d >> 46 & 3),
+		eval:  int(int16(uint16(d >> 48))),
 	}
 }
 
@@ -74,7 +82,7 @@ func (t *TT) probe(key uint64) (ttEntry, bool) {
 	return unpackTT(data), true
 }
 
-func (t *TT) store(key uint64, move Move, score, depth, flag int) {
+func (t *TT) store(key uint64, move Move, score, depth, flag, eval int) {
 	i := (key & t.mask) * 2
 	old := t.slots[i+1].Load()
 	if old != 0 && t.slots[i].Load()^old == key {
@@ -87,7 +95,7 @@ func (t *TT) store(key uint64, move Move, score, depth, flag int) {
 			return
 		}
 	}
-	data := packTT(move, score, depth, flag)
+	data := packTT(move, score, depth, flag, eval)
 	t.slots[i].Store(key ^ data)
 	t.slots[i+1].Store(data)
 }

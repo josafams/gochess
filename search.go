@@ -75,6 +75,7 @@ type thread struct {
 	mbuf    [MaxPly + 2][256]Move // lista de lances de cada ply
 	stack   [MaxPly + 2]Position  // posição de cada ply (evita alocar no heap)
 	sbuf    [MaxPly + 2][256]int  // notas de ordenação de cada ply
+	evals   [MaxPly + 2]int       // eval estática de cada ply (evalNone em xeque)
 }
 
 func NewSearcher(hashMB int) *Searcher {
@@ -263,12 +264,37 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 	if ply >= MaxPly-1 {
 		return t.evaluate(p, ply)
 	}
+	tt := t.s.tt
+	tte, ttHit := tt.probe(p.Hash)
+	if ttHit {
+		sc := scoreFromTT(tte.score, ply)
+		switch {
+		case tte.flag == ttExact,
+			tte.flag == ttLower && sc >= beta,
+			tte.flag == ttUpper && sc <= alpha:
+			return sc
+		}
+	}
 	inCheck := p.InCheck()
 	best := -Inf
-	stand := 0
+	stand, raw := 0, evalNone
 	if !inCheck {
-		stand = t.evaluate(p, ply)
+		if ttHit && tte.eval != evalNone {
+			raw = tte.eval
+		} else {
+			raw = t.evaluate(p, ply)
+		}
+		stand = raw
+		if ttHit && tte.score > -Mate+2*MaxPly && tte.score < Mate-2*MaxPly {
+			sc := tte.score
+			if tte.flag == ttExact || (tte.flag == ttLower && sc > stand) || (tte.flag == ttUpper && sc < stand) {
+				stand = sc
+			}
+		}
 		if stand >= beta {
+			if !ttHit {
+				tt.store(p.Hash, NoMove, scoreToTT(stand, ply), 0, ttLower, raw)
+			}
 			return stand
 		}
 		if stand > alpha {
@@ -277,8 +303,10 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 		best = stand
 	}
 
+	origAlpha := alpha
+	bestMove := NoMove
 	moves := p.generateInto(t.mbuf[ply][:0], !inCheck)
-	scores := t.score(p, moves, ply, NoMove)
+	scores := t.score(p, moves, ply, tte.move)
 	legal := 0
 	for i := range moves {
 		m := pickNext(moves, scores, i)
@@ -306,8 +334,9 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 		if score > best {
 			best = score
 			if score > alpha {
-				alpha = score
+				alpha, bestMove = score, m
 				if score >= beta {
+					tt.store(p.Hash, m, scoreToTT(score, ply), 0, ttLower, raw)
 					return score
 				}
 			}
@@ -316,6 +345,11 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 	if inCheck && legal == 0 {
 		return -Mate + ply
 	}
+	flag := ttUpper
+	if best > origAlpha {
+		flag = ttExact
+	}
+	tt.store(p.Hash, bestMove, scoreToTT(best, ply), 0, flag, raw)
 	return best
 }
 
@@ -348,7 +382,8 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 
 	s := t.s
 	ttMove := NoMove
-	if e, ok := s.tt.probe(p.Hash); ok {
+	tte, ttHit := s.tt.probe(p.Hash)
+	if e, ok := tte, ttHit; ok {
 		ttMove = e.move
 		if !pvNode && e.depth >= depth {
 			score := scoreFromTT(e.score, ply)
@@ -365,14 +400,37 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		depth--
 	}
 
-	eval := -Inf
+	// Eval estática: reaproveita a da tabela; a nota da tabela, quando o
+	// limite aponta na direção certa, é uma estimativa ainda melhor.
+	eval, raw := -Inf, evalNone
 	if !inCheck {
-		eval = t.evaluate(p, ply)
+		if ttHit && tte.eval != evalNone {
+			raw = tte.eval
+		} else {
+			raw = t.evaluate(p, ply)
+		}
+		eval = raw
+		if ttHit && tte.score > -Mate+2*MaxPly && tte.score < Mate-2*MaxPly {
+			sc := tte.score
+			if tte.flag == ttExact || (tte.flag == ttLower && sc > eval) || (tte.flag == ttUpper && sc < eval) {
+				eval = sc
+			}
+		}
+	}
+	t.evals[ply] = raw
+	// improving: a eval estática subiu em relação ao nosso lance anterior.
+	improving := false
+	if !inCheck && ply >= 2 && t.evals[ply-2] != evalNone {
+		improving = raw > t.evals[ply-2]
+	}
+	imp := 0
+	if improving {
+		imp = 1
 	}
 
 	if !pvNode && !inCheck {
 		// Reverse futility.
-		if depth <= 6 && eval-80*depth >= beta && beta > -Mate+2*MaxPly && beta < Mate-2*MaxPly {
+		if depth <= 6 && eval-80*(depth-imp) >= beta && beta > -Mate+2*MaxPly && beta < Mate-2*MaxPly {
 			return eval
 		}
 		// Null move.
@@ -421,7 +479,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 					return 0
 				}
 				if score >= rbeta {
-					s.tt.store(p.Hash, m, scoreToTT(score, ply), depth-3, ttLower)
+					s.tt.store(p.Hash, m, scoreToTT(score, ply), depth-3, ttLower, raw)
 					return score
 				}
 			}
@@ -448,7 +506,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				// Late move pruning. A condição só fica mais verdadeira daqui
 				// em diante, e os killers vêm antes de qualquer quieto: todos os
 				// quietos restantes seriam podados, então saem da lista já.
-				if depth <= 6 && searched >= 3+depth*depth {
+				if depth <= 6 && searched >= (3+depth*depth)/(2-imp) {
 					moves, scores = dropQuiets(moves, scores, i+1)
 					continue
 				}
@@ -487,6 +545,9 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				}
 				if isKiller {
 					r--
+				}
+				if !improving {
+					r++
 				}
 				if quiet {
 					r -= t.hist[p.Side][m.From()][m.To()] / 6000
@@ -548,7 +609,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	} else if best >= beta {
 		flag = ttLower
 	}
-	s.tt.store(p.Hash, bestMove, scoreToTT(best, ply), depth, flag)
+	s.tt.store(p.Hash, bestMove, scoreToTT(best, ply), depth, flag, raw)
 	return best
 }
 
