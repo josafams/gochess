@@ -34,6 +34,18 @@ func main() {
 		runTrain(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "pack" {
+		runPack(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "lichess" {
+		runLichess(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "match" {
+		runMatch(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "gui" {
 		fs := flag.NewFlagSet("gui", flag.ExitOnError)
 		addr := fs.String("addr", "localhost:8080", "endereço do servidor")

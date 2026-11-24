@@ -137,8 +137,39 @@ func ParseFEN(fen string) (*Position, error) {
 			p.Castle |= CastleBQ
 		}
 	}
+	// Descarta direitos de roque sem rei e torre nas casas de origem
+	// (FENs inconsistentes, ex. de Chess960, quebrariam o make do roque).
+	has := func(c, pt, sq int) bool { return p.Board[sq] == int8(c*6+pt) }
+	if !has(White, King, 4) {
+		p.Castle &^= CastleWK | CastleWQ
+	}
+	if !has(Black, King, 60) {
+		p.Castle &^= CastleBK | CastleBQ
+	}
+	if !has(White, Rook, 7) {
+		p.Castle &^= CastleWK
+	}
+	if !has(White, Rook, 0) {
+		p.Castle &^= CastleWQ
+	}
+	if !has(Black, Rook, 63) {
+		p.Castle &^= CastleBK
+	}
+	if !has(Black, Rook, 56) {
+		p.Castle &^= CastleBQ
+	}
 	if f[3] != "-" {
 		p.EP = parseSquare(f[3])
+		// En passant só vale com a casa vazia e o peão adversário logo à frente.
+		if p.EP >= 0 {
+			them, behind, rank := Black, p.EP-8, 5
+			if p.Side == Black {
+				them, behind, rank = White, p.EP+8, 2
+			}
+			if p.EP/8 != rank || p.Board[p.EP] != -1 || !has(them, Pawn, behind) {
+				p.EP = -1
+			}
+		}
 	}
 	if len(f) > 4 {
 		p.Halfmove, _ = strconv.Atoi(f[4])

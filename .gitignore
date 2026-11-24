@@ -4,3 +4,4 @@ gochess-*
 dados*.txt
 *.nnue
 testes/out/
+config.json

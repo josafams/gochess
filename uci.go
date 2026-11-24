@@ -129,6 +129,7 @@ func uciLoop() {
 			say("option name Ponder type check default false")
 			say("option name OwnBook type check default true")
 			say("option name UseNNUE type check default false")
+			say("option name EvalFile type string default <empty>")
 			say("uciok")
 		case "setoption":
 			// setoption name <nome> value <valor>
@@ -152,6 +153,19 @@ func uciLoop() {
 				s.MultiPV = max(1, n)
 			case "ownbook":
 				ownBook = value == "true"
+			case "evalfile":
+				b, err := os.ReadFile(value)
+				if err != nil {
+					say("info string não consegui ler a rede: " + err.Error())
+					continue
+				}
+				net, err := LoadNet(b)
+				if err != nil {
+					say("info string rede inválida: " + err.Error())
+					continue
+				}
+				currentNet, s.UseNNUE = net, true
+				say("info string rede NNUE carregada de " + value)
 			case "usennue":
 				s.UseNNUE = value == "true"
 				if s.UseNNUE && currentNet == nil {

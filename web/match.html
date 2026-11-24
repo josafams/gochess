@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoChess ao vivo</title>
+<style>
+:root {
+  --bg: #f4f1ea; --panel: #fffdf8; --ink: #1d1a15; --muted: #6f675b; --line: #e2dccf;
+  --light: #ece3d0; --dark: #a98a63; --hl: rgba(240, 200, 60, .55);
+  --win: #2f7d4a; --loss: #b0413e; --draw: #7a7468; --accent: #8a5a2b;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #16140f; --panel: #201d17; --ink: #ece6da; --muted: #9c9383; --line: #332e25;
+    --light: #c9b99a; --dark: #876a48; --win: #5fbf7f; --loss: #e07a74; --draw: #a59d8f; --accent: #d9a066; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 system-ui, sans-serif; }
+main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: end; margin-bottom: 16px; }
+h1 { font-size: 22px; margin: 0; }
+h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--muted); }
+.stat { display: flex; flex-direction: column; }
+.stat b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.w { color: var(--win); } .l { color: var(--loss); } .d { color: var(--draw); }
+.restart { margin-left: auto; padding: 8px 14px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; cursor: pointer; font-size: 14px; }
+.restart:hover { border-color: var(--accent); }
+.restart.confirm { background: var(--loss); border-color: var(--loss); color: #fff; }
+.progress { flex-basis: 100%; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.progress div { height: 100%; background: var(--accent); transition: width .3s; }
+.boards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.player { display: flex; justify-content: space-between; align-items: center; font-size: 14px; padding: 4px 2px; gap: 8px; }
+.player .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clock { font-variant-numeric: tabular-nums; background: var(--line); padding: 1px 8px; border-radius: 4px; }
+.clock.on { background: var(--ink); color: var(--panel); }
+.board { display: grid; grid-template-columns: repeat(8, 1fr); aspect-ratio: 1; border-radius: 4px; overflow: hidden; }
+.sq { position: relative; }
+.sq.lt { background: var(--light); } .sq.dk { background: var(--dark); }
+.sq.hl::after { content: ""; position: absolute; inset: 0; background: var(--hl); }
+.sq svg { position: absolute; inset: 4%; width: 92%; height: 92%; z-index: 1; }
+.meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.moves { font-size: 12px; color: var(--muted); margin-top: 4px; height: 3.2em; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+.idle { color: var(--muted); text-align: center; padding: 40px 0; }
+.think { display: none; }
+.boards.solo { grid-template-columns: 1fr; }
+.boards.solo .card { display: grid; grid-template-columns: minmax(0, 560px) minmax(0, 1fr); gap: 20px; padding: 16px; }
+@media (max-width: 860px) { .boards.solo .card { grid-template-columns: 1fr; } }
+.boards.solo .player { font-size: 16px; }
+.boards.solo .clock { font-size: 18px; padding: 2px 10px; }
+.boards.solo .think { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+.boards.solo .think.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.think h3 { margin: 0 0 6px; font-size: 14px; display: flex; justify-content: space-between; gap: 8px; }
+.think h3 small { font-weight: 400; color: var(--muted); }
+.think .nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; font-variant-numeric: tabular-nums; }
+.think .nums b { display: block; font-size: 18px; }
+.think .nums span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.think .pv { margin-top: 8px; font-size: 13px; line-height: 1.5; min-height: 3em; }
+.think .pv::before { content: "Linha que está calculando: "; color: var(--muted); }
+.boards.solo .moves { height: auto; max-height: 9em; overflow-y: auto; display: block; font-size: 13px; margin-top: 10px; }
+.boards.solo .meta { font-size: 13px; margin: 0; }
+h2 { font-size: 16px; margin: 28px 0 8px; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 14px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; color: var(--muted); font-weight: 500; }
+tbody tr { cursor: pointer; } tbody tr:hover { background: var(--line); }
+.tablewrap { overflow-x: auto; }
+dialog { border: none; border-radius: 12px; background: var(--panel); color: var(--ink); padding: 16px; width: min(760px, 96vw); }
+dialog::backdrop { background: rgba(0,0,0,.5); }
+.viewer { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 640px) { .viewer { grid-template-columns: 1fr; } }
+.ctrl { display: flex; gap: 6px; margin-top: 8px; }
+.ctrl button, .close { flex: 1; padding: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px; cursor: pointer; font-size: 15px; }
+.movelist { max-height: 380px; overflow-y: auto; font-size: 14px; line-height: 1.8; }
+.movelist span { cursor: pointer; padding: 1px 4px; border-radius: 3px; }
+.movelist span.cur { background: var(--accent); color: var(--panel); }
+.movelist i { color: var(--muted); font-style: normal; margin-left: 4px; }
+.vhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px; }
+.close { flex: 0 0 auto; padding: 4px 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">GoChess ao vivo<small id="sub">conectando…</small></h1>
+    <div class="stat"><b id="score">–</b><span>placar</span></div>
+    <div class="stat"><b id="pct">–</b><span>pontos</span></div>
+    <div class="stat"><b id="elo">–</b><span>Elo de diferença (95%)</span></div>
+    <div class="stat"><b id="prog">–</b><span>partidas</span></div>
+    <button id="restart" class="restart" title="Encerra as partidas em andamento e zera o placar">↻ Recomeçar do zero</button>
+    <div class="progress"><div id="bar" style="width:0"></div></div>
+  </header>
+  <div class="boards" id="boards"></div>
+  <h2>Partidas terminadas <small style="font-weight:400;color:var(--muted)">(clique para rever)</small></h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>#</th><th>Brancas</th><th>Pretas</th><th>Resultado</th><th>Motivo</th><th>Lances</th></tr></thead>
+    <tbody id="done"></tbody>
+  </table></div>
+</main>
+
+<dialog id="dlg">
+  <div class="vhead"><b id="vtitle"></b><button class="close" id="vclose">Fechar</button></div>
+  <div class="viewer">
+    <div>
+      <div class="board" id="vboard"></div>
+      <div class="ctrl">
+        <button data-go="first">⏮</button><button data-go="prev">◀</button>
+        <button data-go="play">▶︎ auto</button>
+        <button data-go="next">▶</button><button data-go="last">⏭</button>
+      </div>
+    </div>
+    <div class="movelist" id="vmoves"></div>
+  </div>
+</dialog>
+
+<script>
+'use strict';
+const SHAPES = {
+  p: '<circle cx="22.5" cy="13" r="5.5"/><path d="M18.5 18.5h8l3 14h-14z"/>',
+  r: '<path d="M12 9h4.5v3.5h3V9h6v3.5h3V9H33v8H12z"/><path d="M14.5 17h16v15h-16z"/>',
+  n: '<path d="M14 33c0-8 3.5-11.5 6.5-15-3 .5-6.5 2.5-9 .5-1.5-3 3.5-7.5 7-9.5l.8-3.3 3 2.4C30 8 33.5 14.5 33.5 23v10z"/><circle class="dd" cx="20" cy="12.5" r="1.3"/>',
+  b: '<circle cx="22.5" cy="6.5" r="2.3"/><path d="M22.5 9c4.8 3.8 7.2 8.6 5.6 12.8-1.2 2.6-10 2.6-11.2 0C15.3 17.6 17.7 12.8 22.5 9z"/><path class="dd" d="M22.5 13.5v5M20 16h5" fill="none"/><path d="M18.5 23h8l1.5 9.5h-11z"/>',
+  q: '<path d="M11.5 31 9 14l7 8 2.3-13 4.2 12.5L26.7 9l2.3 13 7-8-2.5 17z"/><circle cx="9" cy="13" r="2"/><circle cx="18.3" cy="8.5" r="2"/><circle cx="26.7" cy="8.5" r="2"/><circle cx="36" cy="13" r="2"/>',
+  k: '<path d="M21.4 3h2.2v4h3.4v2.2h-3.4V13h-2.2V9.2H18V7h3.4z"/><path d="M13 31c-2.5-9 3-15.5 9.5-15.5S34.5 22 32 31z"/>'
+};
+const BASE = '<path d="M11 32.5h23a2 2 0 0 1 2 2V37a2 2 0 0 1-2 2H11a2 2 0 0 1-2-2v-2.5a2 2 0 0 1 2-2z"/>';
+const svgCache = {};
+function pieceSVG(ch) {
+  if (svgCache[ch]) return svgCache[ch];
+  const white = ch === ch.toUpperCase(), t = ch.toLowerCase();
+  const fill = white ? '#fbf8f1' : '#2a2620', line = white ? '#1d1a15' : '#0b0a08', det = white ? '#1d1a15' : '#d9cfbd';
+  return svgCache[ch] = `<svg viewBox="0 0 45 45"><g fill="${fill}" stroke="${line}" stroke-width="1.5" stroke-linejoin="round">${SHAPES[t].replaceAll('class="dd"', `stroke="${det}" fill="${det}"`)}${BASE}</g></svg>`;
+}
+function sqIndex(name) { return (8 - +name[1]) * 8 + (name.charCodeAt(0) - 97); }
+function boardHTML(fen, last) {
+  const rows = fen.split(' ')[0].split('/');
+  const hl = new Set();
+  if (last && last.length >= 4) { hl.add(sqIndex(last.slice(0, 2))); hl.add(sqIndex(last.slice(2, 4))); }
+  let html = '', i = 0;
+  for (let r = 0; r < 8; r++) for (const ch of rows[r]) {
+    if (/\d/.test(ch)) { for (let k = 0; k < +ch; k++, i++) html += sq(i, ''); }
+    else { html += sq(i, pieceSVG(ch)); i++; }
+  }
+  function sq(i, inner) {
+    const dark = ((i >> 3) + (i & 7)) & 1;
+    return `<div class="sq ${dark ? 'dk' : 'lt'}${hl.has(i) ? ' hl' : ''}">${inner}</div>`;
+  }
+  return html;
+}
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function clock(ms) {
+  ms = Math.max(0, ms);
+  const s = ms / 1000;
+  if (s < 20) return s.toFixed(1);
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+}
+function moveText(san, tail) {
+  const parts = [];
+  san.forEach((m, i) => parts.push((i % 2 === 0 ? `${i / 2 + 1}. ` : '') + m));
+  return parts.slice(-tail).join(' ');
+}
+
+let state = null, lastDoneKey = '';
+const cards = [];
+function renderLive() {
+  const box = $('boards');
+  const solo = state.live.length === 1;
+  box.classList.toggle('solo', solo);
+  state.live.forEach((g, i) => {
+    if (!cards[i]) {
+      const c = document.createElement('div');
+      c.className = 'card';
+      c.innerHTML = `<div>
+          <div class="player"><span class="nm tb"></span><span class="clock cb"></span></div>
+          <div class="board"></div>
+          <div class="player"><span class="nm tw"></span><span class="clock cw"></span></div>
+        </div>
+        <div>
+          <div class="meta"><span class="num"></span><span class="ev"></span></div>
+          <div class="think tk1"></div>
+          <div class="think tk0"></div>
+          <div class="moves"></div>
+        </div>`;
+      box.appendChild(c);
+      cards[i] = { el: c, fen: null };
+    }
+    const c = cards[i], el = c.el;
+    if (!g) {
+      if (c.fen !== 'idle') { el.querySelector('.board').innerHTML = boardHTML('8/8/8/8/8/8/8/8', ''); c.fen = 'idle'; }
+      el.querySelector('.num').textContent = state.over ? 'match terminado' : 'aguardando…';
+      return;
+    }
+    const key = g.fen + g.last;
+    if (c.fen !== key) { el.querySelector('.board').innerHTML = boardHTML(g.fen, g.last); c.fen = key; }
+    el.querySelector('.tw').textContent = '○ ' + g.white;
+    el.querySelector('.tb').textContent = '● ' + g.black;
+    const turn = g.turn || g.fen.split(' ')[1];
+    const cw = el.querySelector('.cw'), cb = el.querySelector('.cb');
+    cw.textContent = clock(g.wtime); cb.textContent = clock(g.btime);
+    cw.classList.toggle('on', turn === 'w'); cb.classList.toggle('on', turn === 'b');
+    el.querySelector('.num').textContent = `Partida #${g.num} · lance ${Math.floor((g.san || []).length / 2) + 1}`;
+    el.querySelector('.ev').textContent = g.eval ? `${g.eval} (prof. ${g.depth})` : '';
+    el.querySelector('.moves').textContent = moveText(g.san || [], solo ? 999 : 14);
+    if (solo) {
+      [0, 1].forEach(side => {
+        const t = (g.think || [])[side] || {}, box = el.querySelector('.tk' + side);
+        const name = side === 0 ? '○ ' + g.white : '● ' + g.black;
+        const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e3 ? Math.round(n / 1e3) + ' mil' : (n || 0);
+        box.classList.toggle('on', (turn === 'w') === (side === 0));
+        box.innerHTML = `<h3>${esc(name)} <small>${(turn === 'w') === (side === 0) ? 'pensando…' : 'última busca'}</small></h3>
+          <div class="nums">
+            <div><b>${esc(t.eval || '–')}</b><span>nota</span></div>
+            <div><b>${t.depth || '–'}${t.seldepth ? '/' + t.seldepth : ''}</b><span>prof./seletiva</span></div>
+            <div><b>${fmt(t.nodes)}</b><span>posições vistas</span></div>
+            <div><b>${fmt(t.nps)}</b><span>por segundo</span></div>
+          </div>
+          <div class="pv">${esc(t.pv || '–')}</div>`;
+      });
+    }
+  });
+  // Remove tabuleiros que sobraram de um match anterior.
+  while (cards.length > state.live.length) cards.pop().el.remove();
+}
+function renderHeader() {
+  const s = state, n = s.w + s.d + s.l;
+  $('title').firstChild.textContent = `${s.name1} × ${s.name2}`;
+  $('sub').textContent = `cadência ${s.tc} · ${Math.round(s.elapsed / 60)} min${s.over ? ' · terminado' : ''} · placar do ponto de vista de ${s.name1}`;
+  $('score').innerHTML = `<span class="w">+${s.w}</span> <span class="d">=${s.d}</span> <span class="l">−${s.l}</span>`;
+  $('pct').textContent = n ? `${((s.w + s.d / 2) / n * 100).toFixed(1)}%` : '–';
+  const f = x => (x >= 0 ? '+' : '−') + Math.abs(Math.round(x));
+  $('elo').textContent = n ? `${f(s.elo)} [${f(s.eloLo)}, ${f(s.eloHi)}]` : '–';
+  $('prog').textContent = `${s.played}/${s.total}`;
+  $('bar').style.width = `${s.played / s.total * 100}%`;
+}
+function renderDone() {
+  const key = state.done.length + ':' + (state.done[0] ? state.done[0].num : '');
+  if (key === lastDoneKey) return;
+  lastDoneKey = key;
+  $('done').innerHTML = state.done.map(g => {
+    const cls = g.e1 === 1 ? 'w' : g.e1 === 0 ? 'l' : 'd';
+    return `<tr data-n="${g.num}"><td>${g.num}</td><td>${esc(g.white)}</td><td>${esc(g.black)}</td>` +
+      `<td class="${cls}"><b>${g.result}</b></td><td>${esc(g.reason)}</td><td>${Math.ceil(g.plies / 2)}</td></tr>`;
+  }).join('');
+}
+async function poll() {
+  try {
+    state = await (await fetch('state', { cache: 'no-store' })).json();
+    renderHeader(); renderLive(); renderDone();
+  } catch (e) { $('sub').textContent = 'sem conexão com o match (o processo terminou?)'; }
+  setTimeout(poll, 150);
+}
+poll();
+
+// Recomeçar: primeiro clique pede confirmação, o segundo (em até 4 s) executa.
+let confirmTimer = null;
+$('restart').addEventListener('click', async () => {
+  const b = $('restart');
+  if (!b.classList.contains('confirm')) {
+    b.classList.add('confirm');
+    b.textContent = 'Clique de novo para confirmar';
+    confirmTimer = setTimeout(() => { b.classList.remove('confirm'); b.textContent = '↻ Recomeçar do zero'; }, 4000);
+    return;
+  }
+  clearTimeout(confirmTimer);
+  b.disabled = true;
+  b.textContent = 'Recomeçando…';
+  try { await fetch('restart', { method: 'POST' }); } catch (e) {}
+  // Limpa a tela; o próximo "poll" já traz o match novo.
+  cards.length = 0; $('boards').innerHTML = ''; lastDoneKey = ''; $('done').innerHTML = '';
+  setTimeout(() => { b.disabled = false; b.classList.remove('confirm'); b.textContent = '↻ Recomeçar do zero'; }, 2500);
+});
+
+// ===== Rever partida =====
+let view = null, ply = 0, timer = null;
+$('done').addEventListener('click', async e => {
+  const tr = e.target.closest('tr');
+  if (!tr) return;
+  view = await (await fetch('game?n=' + tr.dataset.n)).json();
+  if (!view) return;
+  ply = view.fens.length - 1;
+  $('vtitle').textContent = `#${view.num} ${view.white} – ${view.black}  ${view.result} (${view.reason})`;
+  $('vmoves').innerHTML = (view.san || []).map((m, i) =>
+    (i % 2 === 0 ? `<i>${i / 2 + 1}.</i>` : '') + `<span data-p="${i + 1}">${esc(m)}</span>`).join(' ');
+  drawView();
+  $('dlg').showModal();
+});
+function drawView() {
+  $('vboard').innerHTML = boardHTML(view.fens[ply], ply > 0 ? view.uci[ply - 1] : '');
+  document.querySelectorAll('#vmoves span').forEach(s => s.classList.toggle('cur', +s.dataset.p === ply));
+  const cur = document.querySelector('#vmoves span.cur');
+  if (cur) cur.scrollIntoView({ block: 'nearest' });
+}
+function go(where) {
+  if (!view) return;
+  const last = view.fens.length - 1;
+  if (where === 'play') {
+    if (timer) { clearInterval(timer); timer = null; return; }
+    if (ply === last) ply = 0;
+    timer = setInterval(() => { if (ply >= last) { clearInterval(timer); timer = null; } else { ply++; drawView(); } }, 500);
+    return;
+  }
+  ply = where === 'first' ? 0 : where === 'last' ? last : where === 'prev' ? Math.max(0, ply - 1) : Math.min(last, ply + 1);
+  drawView();
+}
+document.querySelector('.ctrl').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.go); });
+$('vmoves').addEventListener('click', e => { if (e.target.dataset.p) { ply = +e.target.dataset.p; drawView(); } });
+$('vclose').addEventListener('click', () => $('dlg').close());
+$('dlg').addEventListener('close', () => { clearInterval(timer); timer = null; });
+document.addEventListener('keydown', e => {
+  if (!$('dlg').open) return;
+  if (e.key === 'ArrowLeft') go('prev');
+  if (e.key === 'ArrowRight') go('next');
+  if (e.key === 'Home') go('first');
+  if (e.key === 'End') go('last');
+});
+</script>
+</body>
+</html>

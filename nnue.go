@@ -15,7 +15,7 @@ import (
 
 const (
 	nnInputs = 768
-	nnHidden = 128
+	nnHidden = 256
 	nnQA     = 255
 	nnQB     = 64
 	nnScale  = 400

@@ -6,11 +6,11 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,47 +22,79 @@ import (
 //
 //	gochess train -in dados.txt -epochs 20 -out gochess.nnue
 
-type trainSample struct {
-	us, them [32]int16 // índices das entradas por perspectiva (quem joga / adversário)
-	n        int8
-	target   float32
+// trainData guarda as posições no formato compacto (32 bytes cada).
+type trainData struct {
+	recs   []byte
+	lambda float64
 }
 
-func loadTrainData(path string, lambda float64) ([]trainSample, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+func (d *trainData) n() int           { return len(d.recs) / packedSize }
+func (d *trainData) rec(i int) []byte { return d.recs[i*packedSize : (i+1)*packedSize] }
+func (d *trainData) slice(lo, hi int) *trainData {
+	return &trainData{recs: d.recs[lo*packedSize : hi*packedSize], lambda: d.lambda}
+}
+
+func (d *trainData) shuffle(r *rand.Rand) {
+	n := d.n()
+	var tmp [packedSize]byte
+	for i := n - 1; i > 0; i-- {
+		j := r.Intn(i + 1)
+		a, b := d.rec(i), d.rec(j)
+		copy(tmp[:], a)
+		copy(a, b)
+		copy(b, tmp[:])
 	}
-	defer f.Close()
-	var out []trainSample
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		parts := strings.Split(sc.Text(), "|")
-		if len(parts) != 3 {
-			continue
-		}
-		p, err := ParseFEN(strings.TrimSpace(parts[0]))
+}
+
+// loadTrainData lê uma lista de arquivos separados por vírgula: .bin
+// (formato compacto) ou texto do datagen ("FEN | nota | resultado").
+func loadTrainData(paths string, lambda float64) (*trainData, error) {
+	list := strings.Split(paths, ",")
+	total := int64(0)
+	for _, p := range list {
+		st, err := os.Stat(p)
 		if err != nil {
-			continue
+			return nil, err
 		}
-		score, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-		result, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-		if p.Side == Black { // tudo do ponto de vista de quem joga
-			score, result = -score, 1-result
+		if strings.HasSuffix(p, ".bin") {
+			total += st.Size()
+		} else {
+			total += st.Size() / 50 * packedSize // estimativa generosa
 		}
-		var s trainSample
-		for sq := 0; sq < 64; sq++ {
-			if pc := p.Board[sq]; pc >= 0 && s.n < 32 {
-				c, pt := int(pc)/6, int(pc)%6
-				s.us[s.n] = int16(nnFeature(p.Side, c, pt, sq))
-				s.them[s.n] = int16(nnFeature(p.Side^1, c, pt, sq))
-				s.n++
-			}
-		}
-		s.target = float32(lambda*result + (1-lambda)*sigmoid(float64(score)/400))
-		out = append(out, s)
 	}
-	return out, sc.Err()
+	d := &trainData{recs: make([]byte, 0, total), lambda: lambda}
+	for _, p := range list {
+		before := d.n()
+		if strings.HasSuffix(p, ".bin") {
+			f, err := os.Open(p)
+			if err != nil {
+				return nil, err
+			}
+			st, _ := f.Stat()
+			sz := int(st.Size()) / packedSize * packedSize
+			off := len(d.recs)
+			d.recs = d.recs[:off+sz]
+			if _, err := io.ReadFull(f, d.recs[off:]); err != nil {
+				f.Close()
+				return nil, err
+			}
+			f.Close()
+		} else {
+			f, err := os.Open(p)
+			if err != nil {
+				return nil, err
+			}
+			sc := bufio.NewScanner(f)
+			for sc.Scan() {
+				if rec, ok := readTextLine(sc.Text()); ok {
+					d.recs = append(d.recs, rec[:]...)
+				}
+			}
+			f.Close()
+		}
+		fmt.Printf("  %s: %d posições\n", p, d.n()-before)
+	}
+	return d, nil
 }
 
 type floatNet struct {
@@ -107,13 +139,16 @@ func newGrads() *grads {
 }
 
 // step: propaga uma amostra e acumula o gradiente.
-func (n *floatNet) step(s *trainSample, g *grads, accU, accT []float32) {
+func (n *floatNet) step(rec []byte, lambda float64, g *grads, accU, accT []float32) {
 	H := nnHidden
+	var us, them [32]int16
+	cnt, _ := packedFeatures(rec, &us, &them)
+	target := packedTarget(rec, lambda)
 	copy(accU, n.FB)
 	copy(accT, n.FB)
-	for i := 0; i < int(s.n); i++ {
-		wu := n.FW[int(s.us[i])*H : int(s.us[i])*H+H]
-		wt := n.FW[int(s.them[i])*H : int(s.them[i])*H+H]
+	for i := 0; i < cnt; i++ {
+		wu := n.FW[int(us[i])*H : int(us[i])*H+H]
+		wt := n.FW[int(them[i])*H : int(them[i])*H+H]
 		for j := 0; j < H; j++ {
 			accU[j] += wu[j]
 			accT[j] += wt[j]
@@ -125,7 +160,7 @@ func (n *floatNet) step(s *trainSample, g *grads, accU, accT []float32) {
 		out += a*a*n.OW[j] + b*b*n.OW[H+j]
 	}
 	pred := float32(sigmoid(float64(out)))
-	diff := pred - s.target
+	diff := pred - target
 	g.loss += float64(diff * diff)
 	d := 2 * diff * pred * (1 - pred) // d(loss)/d(out)
 	g.OB += d
@@ -144,9 +179,9 @@ func (n *floatNet) step(s *trainSample, g *grads, accU, accT []float32) {
 		accU[j], accT[j] = ga, gb
 		g.FB[j] += ga + gb
 	}
-	for i := 0; i < int(s.n); i++ {
-		gu := g.FW[int(s.us[i])*H : int(s.us[i])*H+H]
-		gt := g.FW[int(s.them[i])*H : int(s.them[i])*H+H]
+	for i := 0; i < cnt; i++ {
+		gu := g.FW[int(us[i])*H : int(us[i])*H+H]
+		gt := g.FW[int(them[i])*H : int(them[i])*H+H]
 		for j := 0; j < H; j++ {
 			gu[j] += accU[j]
 			gt[j] += accT[j]
@@ -195,9 +230,10 @@ func (n *floatNet) quantize() *Net {
 
 func runTrain(args []string) {
 	fs := flag.NewFlagSet("train", flag.ExitOnError)
-	in := fs.String("in", "dados.txt", "dados do datagen")
+	in := fs.String("in", "dados.txt", "arquivos de treino (.bin ou texto), separados por vírgula")
 	epochs := fs.Int("epochs", 20, "épocas")
-	batch := fs.Int("batch", 8192, "tamanho do lote")
+	batch := fs.Int("batch", 16384, "tamanho do lote")
+	nVal := fs.Int("val", 1_000_000, "posições separadas para validação")
 	lr := fs.Float64("lr", 0.001, "taxa de aprendizado inicial")
 	lambda := fs.Float64("lambda", 0.5, "peso do resultado da partida")
 	out := fs.String("out", "gochess.nnue", "arquivo da rede")
@@ -210,10 +246,10 @@ func runTrain(args []string) {
 		os.Exit(1)
 	}
 	r := rand.New(rand.NewSource(42))
-	r.Shuffle(len(data), func(i, j int) { data[i], data[j] = data[j], data[i] })
-	nVal := len(data) / 20
-	val, train := data[:nVal], data[nVal:]
-	fmt.Printf("%d amostras de treino, %d de validação (%v)\n", len(train), len(val), time.Since(start).Round(time.Millisecond))
+	data.shuffle(r)
+	nv := min(*nVal, data.n()/10)
+	val, train := data.slice(0, nv), data.slice(nv, data.n())
+	fmt.Printf("%d amostras de treino, %d de validação, rede 768→%d (%v)\n", train.n(), val.n(), nnHidden, time.Since(start).Round(time.Millisecond))
 
 	net := newFloatNet(r)
 	optFW, optFB, optOW := newAdam(len(net.FW)), newAdam(len(net.FB)), newAdam(len(net.OW))
@@ -227,13 +263,28 @@ func runTrain(args []string) {
 	bestVal := math.Inf(1)
 	var bestNet *Net
 
-	evalLoss := func(set []trainSample) float64 {
-		g := newGrads()
-		accU, accT := make([]float32, nnHidden), make([]float32, nnHidden)
-		for i := range set {
-			net.step(&set[i], g, accU, accT)
+	evalLoss := func(set *trainData) float64 {
+		var wg sync.WaitGroup
+		losses := make([]float64, workers)
+		chunk := (set.n() + workers - 1) / workers
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				g := newGrads()
+				accU, accT := make([]float32, nnHidden), make([]float32, nnHidden)
+				for i := w * chunk; i < min((w+1)*chunk, set.n()); i++ {
+					net.step(set.rec(i), set.lambda, g, accU, accT)
+				}
+				losses[w] = g.loss
+			}(w)
 		}
-		return g.loss / float64(len(set))
+		wg.Wait()
+		t := 0.0
+		for _, l := range losses {
+			t += l
+		}
+		return t / float64(set.n())
 	}
 
 	for ep := 1; ep <= *epochs; ep++ {
@@ -241,10 +292,16 @@ func runTrain(args []string) {
 		if ep > *epochs*2/3 {
 			rate *= 0.1 // reduz no terço final
 		}
-		r.Shuffle(len(train), func(i, j int) { train[i], train[j] = train[j], train[i] })
+		train.shuffle(r)
 		var trainLoss float64
-		for lo := 0; lo < len(train); lo += *batch {
-			hi := min(lo+*batch, len(train))
+		epStart, nextReport := time.Now(), train.n()/20
+		for lo := 0; lo < train.n(); lo += *batch {
+			hi := min(lo+*batch, train.n())
+			if lo >= nextReport {
+				nextReport += train.n() / 20
+				el := time.Since(epStart).Seconds()
+				fmt.Printf("  época %d: %d%% (%.0f mil pos/s, perda %.6f)\n", ep, lo*100/train.n(), float64(lo)/el/1000, trainLoss/float64(lo))
+			}
 			var wg sync.WaitGroup
 			chunk := (hi - lo + workers - 1) / workers
 			for w := 0; w < workers; w++ {
@@ -265,7 +322,7 @@ func runTrain(args []string) {
 					accU, accT := make([]float32, nnHidden), make([]float32, nnHidden)
 					a, b := lo+w*chunk, min(lo+(w+1)*chunk, hi)
 					for i := a; i < b; i++ {
-						net.step(&train[i], gs[w], accU, accT)
+						net.step(train.rec(i), train.lambda, gs[w], accU, accT)
 					}
 				}(w)
 			}
@@ -294,9 +351,13 @@ func runTrain(args []string) {
 			net.OB = ob[0]
 		}
 		vl := evalLoss(val)
-		fmt.Printf("época %d: treino %.6f, validação %.6f (%v)\n", ep, trainLoss/float64(len(train)), vl, time.Since(start).Round(time.Second))
+		fmt.Printf("época %d: treino %.6f, validação %.6f (%v)\n", ep, trainLoss/float64(train.n()), vl, time.Since(start).Round(time.Second))
 		if vl < bestVal {
 			bestVal, bestNet = vl, net.quantize()
+			// Grava a cada melhora: um treino interrompido não perde tudo.
+			if err := os.WriteFile(*out, bestNet.Marshal(), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
 		}
 	}
 	if err := os.WriteFile(*out, bestNet.Marshal(), 0o644); err != nil {
