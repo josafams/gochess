@@ -70,6 +70,9 @@ type thread struct {
 	nodes   uint64
 	killers [MaxPly + 2][2]Move
 	hist    [2][64][64]int
+	capHist [12][64][6]int  // [peça][destino][vítima]
+	cont    [768][768]int16 // [peça*64+destino anterior][peça*64+destino]
+	played  [MaxPly + 2]int // peça*64+destino do lance feito em cada ply (-1 = null)
 	path    []uint64
 	nn      *nnueStack
 	mbuf    [MaxPly + 2][256]Move // lista de lances de cada ply
@@ -160,8 +163,8 @@ func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
 		if m&FlagEP == 0 {
 			victim = int(p.Board[m.To()]) % 6
 		}
-		attacker := int(p.Board[m.From()]) % 6
-		mvv := victim*100 - attacker
+		pc := int(p.Board[m.From()])
+		mvv := victim*1000 + t.capHist[pc][m.To()][victim]/8
 		if p.SEE(m) >= 0 {
 			return 300_000 + mvv
 		}
@@ -176,7 +179,46 @@ func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
 	if m == t.killers[ply][1] {
 		return 190_000
 	}
-	return t.hist[p.Side][m.From()][m.To()]
+	return t.quietScore(p, m, ply)
+}
+
+// quietScore: histórico do lance + histórico de continuação (o que costuma
+// ser bom depois do nosso lance anterior e do lance anterior do adversário).
+func (t *thread) quietScore(p *Position, m Move, ply int) int {
+	key := int(p.Board[m.From()])*64 + m.To()
+	v := t.hist[p.Side][m.From()][m.To()]
+	if ply >= 1 && t.played[ply-1] >= 0 {
+		v += int(t.cont[t.played[ply-1]][key])
+	}
+	if ply >= 2 && t.played[ply-2] >= 0 {
+		v += int(t.cont[t.played[ply-2]][key])
+	}
+	return v
+}
+
+// gravity: soma o bônus mantendo o valor em [-limit, limit].
+func gravity(v, bonus, limit int) int {
+	return v + bonus - v*absInt(bonus)/limit
+}
+
+func (t *thread) updateQuiet(p *Position, m Move, ply, bonus int) {
+	t.updateHistory(p.Side, m, bonus)
+	key := int(p.Board[m.From()])*64 + m.To()
+	for _, back := range [2]int{1, 2} {
+		if ply >= back && t.played[ply-back] >= 0 {
+			c := &t.cont[t.played[ply-back]][key]
+			*c = int16(gravity(int(*c), bonus, 16384))
+		}
+	}
+}
+
+func (t *thread) updateCapture(p *Position, m Move, bonus int) {
+	victim := Pawn
+	if m&FlagEP == 0 {
+		victim = int(p.Board[m.To()]) % 6
+	}
+	h := &t.capHist[p.Board[m.From()]][m.To()][victim]
+	*h = gravity(*h, bonus, 16384)
 }
 
 // score calcula a nota de ordenação de cada lance (buffer do ply); os lances
@@ -438,6 +480,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			r := 3 + depth/5 + min((eval-beta)/200, 3)
 			null := &t.stack[ply+1]
 			*null = p.MakeNull()
+			t.played[ply] = -1
 			t.push(null.Hash)
 			t.nn.pushNull(ply)
 			score := -t.negamax(null, depth-1-r, ply+1, -beta, -beta+1, false)
@@ -468,6 +511,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				if !ok {
 					continue
 				}
+				t.played[ply] = int(p.Board[m.From()])*64 + m.To()
 				t.push(child.Hash)
 				t.nn.push(ply, p, m)
 				score := -t.quiesce(child, ply+1, -rbeta, -rbeta+1)
@@ -494,6 +538,8 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	legal, searched := 0, 0
 	var quiets [64]Move
 	nQuiets := 0
+	var captures [32]Move
+	nCaptures := 0
 
 	for i := 0; i < len(moves); i++ {
 		m := pickNext(moves, scores, i)
@@ -531,6 +577,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		}
 		searched++
 
+		t.played[ply] = int(p.Board[m.From()])*64 + m.To()
 		t.push(child.Hash)
 		t.nn.push(ply, p, m)
 		var score int
@@ -550,7 +597,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 					r++
 				}
 				if quiet {
-					r -= t.hist[p.Side][m.From()][m.To()] / 6000
+					r -= t.quietScore(p, m, ply) / 8000
 				}
 				r = max(0, min(r, depth-2))
 			}
@@ -572,16 +619,21 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			if score > alpha {
 				alpha = score
 				if score >= beta {
+					bonus := min(depth*depth*16, 1600)
 					if quiet {
 						if t.killers[ply][0] != m {
 							t.killers[ply][1] = t.killers[ply][0]
 							t.killers[ply][0] = m
 						}
-						bonus := min(depth*depth*16, 1600)
-						t.updateHistory(p.Side, m, bonus)
+						t.updateQuiet(p, m, ply, bonus)
 						for _, q := range quiets[:nQuiets] {
-							t.updateHistory(p.Side, q, -bonus)
+							t.updateQuiet(p, q, ply, -bonus)
 						}
+					} else if m&FlagCapture != 0 {
+						t.updateCapture(p, m, bonus)
+					}
+					for _, c := range captures[:nCaptures] {
+						t.updateCapture(p, c, -bonus)
 					}
 					break
 				}
@@ -590,6 +642,9 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		if quiet && nQuiets < len(quiets) {
 			quiets[nQuiets] = m
 			nQuiets++
+		} else if !quiet && nCaptures < len(captures) && m&FlagCapture != 0 {
+			captures[nCaptures] = m
+			nCaptures++
 		}
 	}
 
@@ -618,6 +673,7 @@ func (t *thread) searchRoot(p *Position, moves []Move, depth, alpha, beta int) (
 	for i, m := range moves {
 		child := &t.stack[1]
 		*child, _ = p.Make(m)
+		t.played[0] = int(p.Board[m.From()])*64 + m.To()
 		t.push(child.Hash)
 		t.nn.push(0, p, m)
 		var score int
