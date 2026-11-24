@@ -26,3 +26,13 @@ SPRT [0, 5] contra a base, 8+0.08: **H1 aceita, +415 ± 61 Elo** (322 partidas, 
 | SF 2700 (100) | +50 =7 −43 | 53,5% | +24 [−41, +92] |
 
 Estimativa: **~2700**.
+
+## NNUE 768→256 (rede `nnue-v1.nnue`) — 24/11/2026
+
+Treino: 252 milhões de posições (base de avaliações do Lichess, CC0, + 13,7 milhões de self-play),
+15 épocas, lambda 0,5, validação 0,007787 → 0,007156 (2h11 na CPU).
+
+SPRT [0, 5] contra a versão tunada, 8+0.08: **H1 aceita, +238 ± 37 Elo**
+(392 partidas, +293 =39 −60, 79,7%).
+
+Estimativa: **~2900** (falta confirmar contra o Stockfish 2700/3000).
