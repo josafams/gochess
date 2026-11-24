@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoChess</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="app">
+  <header class="top">
+    <h1>GoChess</h1>
+    <p id="status" class="status" aria-live="polite">Carregando a engine…</p>
+  </header>
+
+  <section class="table" aria-label="Tabuleiro">
+    <div class="clock-row top-clock"><span class="who" id="top-name">Engine</span><span class="clock" id="clock-top">—</span></div>
+    <div class="board-line">
+      <div class="evalbar" id="evalbar" title="Avaliação da engine">
+        <div class="evalfill" id="evalfill"></div>
+        <span class="evaltext" id="evaltext">0.0</span>
+      </div>
+      <div class="board-wrap">
+        <div id="board" class="board" role="grid"></div>
+        <div id="drag" class="drag hidden" aria-hidden="true"></div>
+        <div id="promo" class="sheet hidden" role="dialog" aria-label="Promoção">
+          <p>Promover para</p>
+          <div id="promo-choices" class="promo-choices"></div>
+          <button class="ghost" id="promo-cancel" type="button">Cancelar</button>
+        </div>
+        <div id="result" class="sheet hidden" role="dialog" aria-label="Fim de jogo">
+          <p id="result-title" class="result-title"></p>
+          <p id="result-sub" class="result-sub"></p>
+          <button class="primary" id="result-new" type="button">Nova partida</button>
+          <button class="ghost" id="result-close" type="button">Ver tabuleiro</button>
+        </div>
+        <div id="posdlg" class="sheet hidden" role="dialog" aria-label="Posição">
+          <p class="sheet-title">Carregar posição</p>
+          <textarea id="pos-text" rows="5" placeholder="Cole um FEN ou um PGN"></textarea>
+          <p id="pos-error" class="pos-error"></p>
+          <div class="sheet-buttons">
+            <button class="primary" id="pos-load" type="button">Carregar</button>
+            <button class="ghost" id="pos-cancel" type="button">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="clock-row bottom-clock"><span class="who" id="bottom-name">Você</span><span class="clock" id="clock-bottom">—</span></div>
+    <div class="nav" aria-label="Navegar pelos lances">
+      <button type="button" id="nav-first" aria-label="Início">⏮</button>
+      <button type="button" id="nav-prev" aria-label="Lance anterior">◀</button>
+      <button type="button" id="nav-next" aria-label="Próximo lance">▶</button>
+      <button type="button" id="nav-last" aria-label="Posição atual">⏭</button>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <div class="controls">
+      <div class="seg" role="tablist" aria-label="Modo">
+        <button type="button" id="mode-play" class="on" role="tab">Jogar</button>
+        <button type="button" id="mode-analysis" role="tab">Analisar</button>
+      </div>
+      <label class="field">
+        <span>Jogar com</span>
+        <select id="color">
+          <option value="w">Brancas</option>
+          <option value="b">Pretas</option>
+          <option value="r">Sorteio</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Nível</span>
+        <select id="level">
+          <option value="1">1 · Iniciante</option>
+          <option value="2">2 · Fácil</option>
+          <option value="3">3 · Médio</option>
+          <option value="4" selected>4 · Forte</option>
+          <option value="5">5 · Muito forte</option>
+          <option value="6">6 · Máximo</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Relógio</span>
+        <select id="tc">
+          <option value="">Sem relógio</option>
+          <option value="60+0">1 + 0</option>
+          <option value="180+2">3 + 2</option>
+          <option value="300+3">5 + 3</option>
+          <option value="600+5">10 + 5</option>
+          <option value="900+10">15 + 10</option>
+        </select>
+      </label>
+      <label class="field check">
+        <input type="checkbox" id="sound" checked>
+        <span>Som</span>
+      </label>
+      <div class="buttons">
+        <button class="primary" id="new" type="button">Nova partida</button>
+        <button id="undo" type="button">Desfazer</button>
+        <button id="hint" type="button">Dica</button>
+        <button id="flip" type="button">Girar</button>
+      </div>
+    </div>
+
+    <div class="engine" id="engine">
+      <div class="engine-head">
+        <span id="engine-title">Engine</span>
+        <span id="engine-stats" class="stats">—</span>
+      </div>
+      <ol id="lines" class="lines"></ol>
+      <p id="engine-pv" class="pv">A linha calculada aparece aqui depois do primeiro lance da engine.</p>
+    </div>
+
+    <div class="sheet-moves">
+      <div class="engine-head">
+        <span>Lances</span>
+        <span class="links">
+          <button id="open-pos" class="link" type="button">FEN/PGN</button>
+          <button id="copy-fen" class="link" type="button">Copiar FEN</button>
+          <button id="copy" class="link" type="button">Copiar PGN</button>
+        </span>
+      </div>
+      <ol id="moves" class="moves"></ol>
+    </div>
+  </aside>
+</main>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

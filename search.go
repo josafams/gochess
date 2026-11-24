@@ -1,0 +1,785 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	Inf    = 100000
+	Mate   = 50000
+	MaxPly = 100
+)
+
+type Limits struct {
+	Depth     int
+	Nodes     uint64
+	Mate      int // procurar mate em N lances
+	MoveTime  time.Duration
+	WTime     time.Duration
+	BTime     time.Duration
+	WInc      time.Duration
+	BInc      time.Duration
+	MovesToGo int
+	Infinite  bool
+	Ponder    bool
+}
+
+// Line é uma variante (para MultiPV).
+type Line struct {
+	Move  Move
+	Score int
+	PV    []Move
+}
+
+// Result é o resumo da última iteração completa.
+type Result struct {
+	Best  Move
+	Score int // do ponto de vista de quem joga
+	Depth int
+	Nodes uint64
+	Time  time.Duration
+	PV    []Move
+	Lines []Line
+}
+
+// Searcher guarda o que é compartilhado entre as threads.
+type Searcher struct {
+	tt      *TT
+	Threads int
+	MultiPV int
+	UseNNUE bool
+	workers []*thread
+
+	stop       atomic.Bool
+	timed      atomic.Bool
+	deadline   atomic.Int64 // unix nano: limite duro
+	soft       atomic.Int64 // unix nano: não começar nova iteração
+	budget     time.Duration
+	nodeLimit  uint64
+	totalNodes atomic.Uint64
+}
+
+// thread guarda o estado de cada thread de busca (Lazy SMP).
+type thread struct {
+	s       *Searcher
+	id      int
+	nodes   uint64
+	killers [MaxPly + 2][2]Move
+	hist    [2][64][64]int
+	path    []uint64
+	nn      *nnueStack
+}
+
+func NewSearcher(hashMB int) *Searcher {
+	s := &Searcher{tt: NewTT(hashMB), Threads: 1, MultiPV: 1}
+	return s
+}
+
+func (s *Searcher) SetHash(mb int) { s.tt = NewTT(mb) }
+
+func (s *Searcher) Clear() {
+	s.tt.Clear()
+	s.workers = nil
+}
+
+func (s *Searcher) Stop() { s.stop.Store(true) }
+
+// ResetStop deve ser chamado antes de cada busca nova.
+func (s *Searcher) ResetStop() { s.stop.Store(false) }
+
+// PonderHit: o adversário jogou o lance previsto; passa a contar o tempo.
+func (s *Searcher) PonderHit() {
+	now := time.Now()
+	if s.budget > 0 {
+		s.deadline.Store(now.Add(s.budget).UnixNano())
+		s.soft.Store(now.Add(s.budget / 2).UnixNano())
+		s.timed.Store(true)
+	}
+}
+
+var lmrTable [64][64]int
+
+func init() {
+	for d := 1; d < 64; d++ {
+		for i := 1; i < 64; i++ {
+			lmrTable[d][i] = int(0.8 + math.Log(float64(d))*math.Log(float64(i))/2.2)
+		}
+	}
+}
+
+func (t *thread) push(h uint64) { t.path = append(t.path, h) }
+func (t *thread) pop()          { t.path = t.path[:len(t.path)-1] }
+
+func (t *thread) isRepetition(halfmove int) bool {
+	n := len(t.path)
+	cur := t.path[n-1]
+	for i := n - 3; i >= 0 && i >= n-1-halfmove; i -= 2 {
+		if t.path[i] == cur {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *thread) setupNN(p *Position) {
+	t.nn.reset(p)
+	if t.s.UseNNUE && currentNet != nil {
+		t.nn.enable(currentNet, p)
+	}
+}
+
+func (t *thread) evaluate(p *Position, ply int) int {
+	if t.s.UseNNUE && currentNet != nil {
+		if v, ok := evalEndgame(p); ok {
+			return v
+		}
+		return t.nn.evaluate(p, ply)
+	}
+	return Evaluate(p)
+}
+
+// Ordenação: lance da TT > promoção a dama > boas capturas (MVV-LVA)
+// > killers > lances quietos pelo histórico > capturas perdedoras.
+func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
+	if m == first {
+		return 1_000_000
+	}
+	if m.Promo() == Queen {
+		return 400_000
+	}
+	if m&FlagCapture != 0 {
+		victim := Pawn
+		if m&FlagEP == 0 {
+			victim = int(p.Board[m.To()]) % 6
+		}
+		attacker := int(p.Board[m.From()]) % 6
+		mvv := victim*100 - attacker
+		if p.SEE(m) >= 0 {
+			return 300_000 + mvv
+		}
+		return -300_000 + mvv
+	}
+	if m.Promo() != 0 {
+		return -400_000 // sub-promoções por último
+	}
+	if m == t.killers[ply][0] {
+		return 200_000
+	}
+	if m == t.killers[ply][1] {
+		return 190_000
+	}
+	return t.hist[p.Side][m.From()][m.To()]
+}
+
+func (t *thread) order(p *Position, moves []Move, ply int, first Move) {
+	var buf [256]int
+	scores := buf[:len(moves)]
+	for i, m := range moves {
+		scores[i] = t.scoreMove(p, m, ply, first)
+	}
+	for i := 1; i < len(moves); i++ {
+		for j := i; j > 0 && scores[j] > scores[j-1]; j-- {
+			scores[j], scores[j-1] = scores[j-1], scores[j]
+			moves[j], moves[j-1] = moves[j-1], moves[j]
+		}
+	}
+}
+
+func (t *thread) checkStop() bool {
+	t.nodes++
+	if t.nodes&255 == 0 {
+		s := t.s
+		total := s.totalNodes.Add(256)
+		if s.nodeLimit > 0 && total >= s.nodeLimit {
+			s.stop.Store(true)
+		}
+		if t.id == 0 && s.timed.Load() && time.Now().UnixNano() > s.deadline.Load() {
+			s.stop.Store(true)
+		}
+	}
+	return t.s.stop.Load()
+}
+
+// updateHistory com "gravidade": mantém os valores entre -16384 e 16384.
+func (t *thread) updateHistory(side int, m Move, bonus int) {
+	h := &t.hist[side][m.From()][m.To()]
+	*h += bonus - *h*absInt(bonus)/16384
+}
+
+// quiesce: só capturas (ou todas as evasões, se em xeque) até a posição acalmar.
+func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
+	if t.checkStop() {
+		return 0
+	}
+	if ply >= MaxPly-1 {
+		return t.evaluate(p, ply)
+	}
+	inCheck := p.InCheck()
+	best := -Inf
+	stand := 0
+	if !inCheck {
+		stand = t.evaluate(p, ply)
+		if stand >= beta {
+			return stand
+		}
+		if stand > alpha {
+			alpha = stand
+		}
+		best = stand
+	}
+
+	moves := p.GenerateMoves(!inCheck)
+	t.order(p, moves, ply, NoMove)
+	legal := 0
+	for _, m := range moves {
+		if !inCheck {
+			// Delta pruning: nem ganhando a peça chega perto de alfa.
+			if m.Promo() == 0 && m&FlagEP == 0 && stand+seeValue[int(p.Board[m.To()])%6]+200 <= alpha {
+				continue
+			}
+			if p.SEE(m) < 0 {
+				continue
+			}
+		}
+		child, ok := p.Make(m)
+		if !ok {
+			continue
+		}
+		legal++
+		t.nn.push(ply, p, m)
+		score := -t.quiesce(&child, ply+1, -beta, -alpha)
+		if t.s.stop.Load() {
+			return 0
+		}
+		if score > best {
+			best = score
+			if score > alpha {
+				alpha = score
+				if score >= beta {
+					return score
+				}
+			}
+		}
+	}
+	if inCheck && legal == 0 {
+		return -Mate + ply
+	}
+	return best
+}
+
+func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull bool) int {
+	if t.checkStop() {
+		return 0
+	}
+	pvNode := beta-alpha > 1
+
+	if p.Halfmove >= 100 || t.isRepetition(p.Halfmove) || p.InsufficientMaterial() {
+		return 0
+	}
+	if ply >= MaxPly-1 {
+		return t.evaluate(p, ply)
+	}
+	// Mate distance pruning: não adianta buscar mate mais longo que um já achado.
+	alpha = max(alpha, -Mate+ply)
+	beta = min(beta, Mate-ply-1)
+	if alpha >= beta {
+		return alpha
+	}
+
+	inCheck := p.InCheck()
+	if inCheck {
+		depth++
+	}
+	if depth <= 0 {
+		return t.quiesce(p, ply, alpha, beta)
+	}
+
+	s := t.s
+	ttMove := NoMove
+	if e, ok := s.tt.probe(p.Hash); ok {
+		ttMove = e.move
+		if !pvNode && e.depth >= depth {
+			score := scoreFromTT(e.score, ply)
+			switch {
+			case e.flag == ttExact,
+				e.flag == ttLower && score >= beta,
+				e.flag == ttUpper && score <= alpha:
+				return score
+			}
+		}
+	}
+	// IIR: sem lance da tabela, reduz um pouco (ordenação será pior de qualquer jeito).
+	if ttMove == NoMove && depth >= 4 {
+		depth--
+	}
+
+	eval := -Inf
+	if !inCheck {
+		eval = t.evaluate(p, ply)
+	}
+
+	if !pvNode && !inCheck {
+		// Reverse futility.
+		if depth <= 6 && eval-80*depth >= beta && beta > -Mate+2*MaxPly && beta < Mate-2*MaxPly {
+			return eval
+		}
+		// Null move.
+		if allowNull && depth >= 3 && eval >= beta && p.hasNonPawn(p.Side) {
+			r := 3 + depth/5 + min((eval-beta)/200, 3)
+			null := p.MakeNull()
+			t.push(null.Hash)
+			t.nn.pushNull(ply)
+			score := -t.negamax(&null, depth-1-r, ply+1, -beta, -beta+1, false)
+			t.pop()
+			if s.stop.Load() {
+				return 0
+			}
+			if score >= beta {
+				if score > Mate-2*MaxPly {
+					score = beta
+				}
+				return score
+			}
+		}
+		// ProbCut: uma captura boa que passa de beta com folga em busca rasa.
+		if depth >= 5 && beta < Mate-2*MaxPly {
+			rbeta := beta + 180
+			caps := p.GenerateMoves(true)
+			t.order(p, caps, ply, ttMove)
+			for _, m := range caps {
+				if p.SEE(m) < rbeta-eval {
+					continue
+				}
+				child, ok := p.Make(m)
+				if !ok {
+					continue
+				}
+				t.push(child.Hash)
+				t.nn.push(ply, p, m)
+				score := -t.quiesce(&child, ply+1, -rbeta, -rbeta+1)
+				if score >= rbeta {
+					score = -t.negamax(&child, depth-4, ply+1, -rbeta, -rbeta+1, true)
+				}
+				t.pop()
+				if s.stop.Load() {
+					return 0
+				}
+				if score >= rbeta {
+					s.tt.store(p.Hash, m, scoreToTT(score, ply), depth-3, ttLower)
+					return score
+				}
+			}
+		}
+	}
+
+	moves := p.GenerateMoves(false)
+	t.order(p, moves, ply, ttMove)
+
+	origAlpha := alpha
+	best, bestMove := -Inf, NoMove
+	legal, searched := 0, 0
+	var quiets [64]Move
+	nQuiets := 0
+
+	for _, m := range moves {
+		quiet := m&FlagCapture == 0 && m.Promo() == 0
+		isKiller := m == t.killers[ply][0] || m == t.killers[ply][1]
+
+		// Podas em lances tardios (só depois de ter um lance que não perde de mate).
+		if ply > 0 && !inCheck && best > -Mate+2*MaxPly {
+			if quiet && !isKiller {
+				// Late move pruning.
+				if depth <= 6 && searched >= 3+depth*depth {
+					continue
+				}
+			} else if !quiet && depth <= 5 && p.SEE(m) < -90*depth {
+				continue
+			}
+		}
+
+		child, ok := p.Make(m)
+		if !ok {
+			continue
+		}
+		legal++
+		givesCheck := child.InCheck()
+
+		// Futility: lance quieto perto das folhas que não tem como subir até alfa.
+		if ply > 0 && quiet && !inCheck && !givesCheck && !isKiller && depth <= 5 &&
+			best > -Mate+2*MaxPly && eval+100+90*depth <= alpha {
+			continue
+		}
+		searched++
+
+		t.push(child.Hash)
+		t.nn.push(ply, p, m)
+		var score int
+		if searched == 1 {
+			score = -t.negamax(&child, depth-1, ply+1, -beta, -alpha, true)
+		} else {
+			r := 0
+			if depth >= 3 && searched > 2 && !inCheck && !givesCheck && (quiet || p.SEE(m) < 0) {
+				r = lmrTable[min(depth, 63)][min(searched, 63)]
+				if pvNode {
+					r--
+				}
+				if isKiller {
+					r--
+				}
+				if quiet {
+					r -= t.hist[p.Side][m.From()][m.To()] / 6000
+				}
+				r = max(0, min(r, depth-2))
+			}
+			score = -t.negamax(&child, depth-1-r, ply+1, -alpha-1, -alpha, true)
+			if score > alpha && r > 0 {
+				score = -t.negamax(&child, depth-1, ply+1, -alpha-1, -alpha, true)
+			}
+			if score > alpha && score < beta {
+				score = -t.negamax(&child, depth-1, ply+1, -beta, -alpha, true)
+			}
+		}
+		t.pop()
+		if s.stop.Load() {
+			return 0
+		}
+
+		if score > best {
+			best, bestMove = score, m
+			if score > alpha {
+				alpha = score
+				if score >= beta {
+					if quiet {
+						if t.killers[ply][0] != m {
+							t.killers[ply][1] = t.killers[ply][0]
+							t.killers[ply][0] = m
+						}
+						bonus := min(depth*depth*16, 1600)
+						t.updateHistory(p.Side, m, bonus)
+						for _, q := range quiets[:nQuiets] {
+							t.updateHistory(p.Side, q, -bonus)
+						}
+					}
+					break
+				}
+			}
+		}
+		if quiet && nQuiets < len(quiets) {
+			quiets[nQuiets] = m
+			nQuiets++
+		}
+	}
+
+	if legal == 0 {
+		if inCheck {
+			return -Mate + ply
+		}
+		return 0
+	}
+	if best == -Inf { // todos os lances podados
+		return alpha
+	}
+
+	flag := ttExact
+	if best <= origAlpha {
+		flag = ttUpper
+	} else if best >= beta {
+		flag = ttLower
+	}
+	s.tt.store(p.Hash, bestMove, scoreToTT(best, ply), depth, flag)
+	return best
+}
+
+func (t *thread) searchRoot(p *Position, moves []Move, depth, alpha, beta int) (int, Move) {
+	best, bestMove := -Inf, NoMove
+	for i, m := range moves {
+		child, _ := p.Make(m)
+		t.push(child.Hash)
+		t.nn.push(0, p, m)
+		var score int
+		if i == 0 {
+			score = -t.negamax(&child, depth-1, 1, -beta, -alpha, true)
+		} else {
+			score = -t.negamax(&child, depth-1, 1, -alpha-1, -alpha, true)
+			if score > alpha && score < beta {
+				score = -t.negamax(&child, depth-1, 1, -beta, -alpha, true)
+			}
+		}
+		t.pop()
+		if t.s.stop.Load() {
+			break
+		}
+		if score > best {
+			best = score
+			if score > alpha {
+				alpha, bestMove = score, m
+				if score >= beta {
+					break
+				}
+			}
+		}
+	}
+	return best, bestMove
+}
+
+func (s *Searcher) setupTime(p *Position, lim Limits) {
+	now := time.Now()
+	s.timed.Store(false)
+	s.budget = 0
+	switch {
+	case lim.MoveTime > 0:
+		s.budget = lim.MoveTime
+	case lim.WTime > 0 || lim.BTime > 0:
+		left, inc := lim.WTime, lim.WInc
+		if p.Side == Black {
+			left, inc = lim.BTime, lim.BInc
+		}
+		mtg := 30
+		if lim.MovesToGo > 0 {
+			mtg = min(lim.MovesToGo+1, 30)
+		}
+		budget := left/time.Duration(mtg) + inc*3/4
+		if budget > left/2 {
+			budget = left / 2
+		}
+		if budget > left-50*time.Millisecond {
+			budget = max(left-50*time.Millisecond, 5*time.Millisecond)
+		}
+		s.budget = budget
+	}
+	if s.budget > 0 && !lim.Infinite && !lim.Ponder {
+		s.deadline.Store(now.Add(s.budget).UnixNano())
+		if lim.MoveTime > 0 {
+			s.soft.Store(now.Add(s.budget).UnixNano())
+		} else {
+			s.soft.Store(now.Add(s.budget / 2).UnixNano())
+		}
+		s.timed.Store(true)
+	}
+}
+
+func (t *thread) extractPV(p *Position, first Move, maxLen int) []Move {
+	pv := []Move{first}
+	pos, _ := p.Make(first)
+	seen := map[uint64]bool{p.Hash: true}
+	for len(pv) < maxLen && !seen[pos.Hash] {
+		seen[pos.Hash] = true
+		e, ok := t.s.tt.probe(pos.Hash)
+		if !ok || e.move == NoMove {
+			break
+		}
+		valid := false
+		for _, m := range pos.GenerateMoves(false) {
+			if m == e.move {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			break
+		}
+		next, ok := pos.Make(e.move)
+		if !ok {
+			break
+		}
+		pv = append(pv, e.move)
+		pos = next
+	}
+	return pv
+}
+
+func ScoreString(score int) string {
+	if score > Mate-2*MaxPly {
+		return fmt.Sprintf("mate %d", (Mate-score+1)/2)
+	}
+	if score < -Mate+2*MaxPly {
+		return fmt.Sprintf("mate %d", -(Mate+score)/2)
+	}
+	return fmt.Sprintf("cp %d", score)
+}
+
+func (s *Searcher) newThread(id int) *thread {
+	return &thread{s: s, id: id, nn: newNNUEStack()}
+}
+
+// Search: aprofundamento iterativo com aspiration windows, MultiPV e Lazy SMP
+// (threads auxiliares buscam a mesma posição e se ajudam pela tabela).
+// path: hashes do jogo até p (inclusive). searchMoves: restringe a raiz (opcional).
+func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(string)) Result {
+	if s.tt == nil {
+		s.tt = NewTT(16)
+	}
+	threads := max(1, s.Threads)
+	for len(s.workers) < threads {
+		s.workers = append(s.workers, s.newThread(len(s.workers)))
+	}
+	s.totalNodes.Store(0)
+	s.nodeLimit = lim.Nodes
+	s.setupTime(p, lim)
+	start := time.Now()
+
+	basePath := append([]uint64(nil), path...)
+	if len(basePath) == 0 || basePath[len(basePath)-1] != p.Hash {
+		basePath = append(basePath, p.Hash)
+	}
+
+	rootMoves := p.LegalMoves()
+	res := Result{}
+	if len(rootMoves) == 0 {
+		return res
+	}
+	res.Best = rootMoves[0]
+	if e, ok := s.tt.probe(p.Hash); ok {
+		for _, m := range rootMoves {
+			if m == e.move {
+				res.Best = m
+			}
+		}
+	}
+	if len(rootMoves) == 1 && s.timed.Load() && !lim.Infinite {
+		res.PV = []Move{res.Best}
+		return res
+	}
+
+	maxDepth := lim.Depth
+	if maxDepth <= 0 || maxDepth >= MaxPly-2 {
+		maxDepth = MaxPly - 3
+	}
+
+	// Threads auxiliares.
+	var wg sync.WaitGroup
+	for i := 1; i < threads; i++ {
+		w := s.workers[i]
+		w.nodes = 0
+		w.path = append(w.path[:0], basePath...)
+		w.killers = [MaxPly + 2][2]Move{}
+		w.setupNN(p)
+		wg.Add(1)
+		go func(w *thread) {
+			defer wg.Done()
+			moves := append([]Move(nil), rootMoves...)
+			best := res.Best
+			for d := 1 + w.id%2; d <= maxDepth && !s.stop.Load(); d++ {
+				w.order(p, moves, 0, best)
+				_, m := w.searchRoot(p, moves, d, -Inf, Inf)
+				if m != NoMove {
+					best = m
+				}
+			}
+		}(w)
+	}
+
+	main := s.workers[0]
+	main.nodes = 0
+	main.path = append(main.path[:0], basePath...)
+	main.killers = [MaxPly + 2][2]Move{}
+	main.setupNN(p)
+
+	multiPV := max(1, min(s.MultiPV, len(rootMoves)))
+	prevScore := 0
+	prevLines := []Line{}
+
+	for depth := 1; depth <= maxDepth; depth++ {
+		var lines []Line
+		chosen := map[Move]bool{}
+		stopped := false
+		for pvIdx := 0; pvIdx < multiPV; pvIdx++ {
+			moves := make([]Move, 0, len(rootMoves))
+			for _, m := range rootMoves {
+				if !chosen[m] {
+					moves = append(moves, m)
+				}
+			}
+			first := res.Best
+			if pvIdx < len(prevLines) && !chosen[prevLines[pvIdx].Move] {
+				first = prevLines[pvIdx].Move
+			} else if pvIdx > 0 {
+				first = NoMove
+			}
+			main.order(p, moves, 0, first)
+
+			window := 30
+			alpha, beta := -Inf, Inf
+			if depth >= 4 && pvIdx == 0 {
+				alpha, beta = prevScore-window, prevScore+window
+			}
+			var score int
+			var move Move
+			for {
+				score, move = main.searchRoot(p, moves, depth, alpha, beta)
+				if move != NoMove {
+					main.order(p, moves, 0, move)
+					if pvIdx == 0 {
+						res.Best = move
+					}
+				}
+				if s.stop.Load() {
+					break
+				}
+				if score <= alpha {
+					alpha = max(-Inf, alpha-window)
+				} else if score >= beta {
+					beta = min(Inf, beta+window)
+				} else {
+					break
+				}
+				window *= 2
+				if window > 800 {
+					alpha, beta = -Inf, Inf
+				}
+			}
+			if s.stop.Load() {
+				stopped = true
+				break
+			}
+			chosen[move] = true
+			lines = append(lines, Line{Move: move, Score: score, PV: main.extractPV(p, move, depth)})
+		}
+		if stopped {
+			break
+		}
+
+		prevLines = lines
+		prevScore = lines[0].Score
+		res.Best, res.Score, res.Depth = lines[0].Move, lines[0].Score, depth
+		res.PV, res.Lines = lines[0].PV, lines
+		res.Nodes, res.Time = s.totalNodes.Load()+main.nodes%256, time.Since(start)
+
+		if info != nil {
+			ms := res.Time.Milliseconds()
+			nps := uint64(0)
+			if ms > 0 {
+				nps = res.Nodes * 1000 / uint64(ms)
+			}
+			for i, l := range lines {
+				pvs := ""
+				for _, m := range l.PV {
+					pvs += " " + m.String()
+				}
+				info(fmt.Sprintf("info depth %d multipv %d score %s nodes %d nps %d hashfull %d time %d pv%s",
+					depth, i+1, ScoreString(l.Score), res.Nodes, nps, s.tt.Hashfull(), ms, pvs))
+			}
+		}
+
+		if lim.Mate > 0 && res.Score > Mate-2*MaxPly && (Mate-res.Score+1)/2 <= lim.Mate {
+			break
+		}
+		if s.timed.Load() && time.Now().UnixNano() > s.soft.Load() {
+			break
+		}
+		if !lim.Infinite && !lim.Ponder && lim.Mate == 0 && res.Score > Mate-2*MaxPly && depth > 2*(Mate-res.Score)+4 {
+			break
+		}
+	}
+	s.stop.Store(true)
+	wg.Wait()
+	res.Nodes, res.Time = s.totalNodes.Load()+main.nodes%256, time.Since(start)
+	if len(res.PV) == 0 || res.PV[0] != res.Best {
+		res.PV = []Move{res.Best}
+	}
+	return res
+}

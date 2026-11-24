@@ -1,0 +1,6 @@
+gochess
+gochess-*
+*.zip
+dados*.txt
+*.nnue
+testes/out/
