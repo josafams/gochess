@@ -17,9 +17,9 @@ import (
 // num processo que fica aberto entre os lances.
 
 type guiEngine struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	path      string   // "" = engine embutida
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	path      string // "" = engine embutida
 	opts      [][2]string
 	stockfish bool // nível vira UCI_Elo
 

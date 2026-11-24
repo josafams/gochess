@@ -42,6 +42,10 @@ func main() {
 		runLichess(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "bench" {
+		runBench(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "match" {
 		runMatch(os.Args[2:])
 		return

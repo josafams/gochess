@@ -37,7 +37,12 @@ func (m Move) String() string {
 // isso é verificado em Make). Com capturesOnly, gera só capturas e promoções,
 // usado na quiescence search.
 func (p *Position) GenerateMoves(capturesOnly bool) []Move {
-	moves := make([]Move, 0, 48)
+	return p.generateInto(make([]Move, 0, 48), capturesOnly)
+}
+
+// generateInto acrescenta os lances a moves (a busca passa um buffer por ply,
+// para não alocar memória a cada nó).
+func (p *Position) generateInto(moves []Move, capturesOnly bool) []Move {
 	us, them := p.Side, p.Side^1
 	enemy := p.Occ[them]
 	empty := ^p.All

@@ -72,6 +72,9 @@ type thread struct {
 	hist    [2][64][64]int
 	path    []uint64
 	nn      *nnueStack
+	mbuf    [MaxPly + 2][256]Move // lista de lances de cada ply
+	stack   [MaxPly + 2]Position  // posição de cada ply (evita alocar no heap)
+	sbuf    [MaxPly + 2][256]int  // notas de ordenação de cada ply
 }
 
 func NewSearcher(hashMB int) *Searcher {
@@ -175,6 +178,48 @@ func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
 	return t.hist[p.Side][m.From()][m.To()]
 }
 
+// score calcula a nota de ordenação de cada lance (buffer do ply); os lances
+// são escolhidos um a um com pickNext, sem ordenar a lista toda: na maioria
+// dos nós o primeiro ou o segundo lance já corta.
+func (t *thread) score(p *Position, moves []Move, ply int, first Move) []int {
+	scores := t.sbuf[ply][:len(moves)]
+	for i, m := range moves {
+		scores[i] = t.scoreMove(p, m, ply, first)
+	}
+	return scores
+}
+
+// pickNext traz para a posição i o lance de maior nota entre os restantes,
+// preservando a ordem relativa dos outros (igual a uma ordenação estável).
+func pickNext(moves []Move, scores []int, i int) Move {
+	best := i
+	for j := i + 1; j < len(moves); j++ {
+		if scores[j] > scores[best] {
+			best = j
+		}
+	}
+	if best != i {
+		m, sc := moves[best], scores[best]
+		copy(moves[i+1:best+1], moves[i:best])
+		copy(scores[i+1:best+1], scores[i:best])
+		moves[i], scores[i] = m, sc
+	}
+	return moves[i]
+}
+
+// dropQuiets remove os lances quietos de moves[from:], mantendo a ordem.
+func dropQuiets(moves []Move, scores []int, from int) ([]Move, []int) {
+	n := from
+	for j := from; j < len(moves); j++ {
+		if m := moves[j]; m&FlagCapture != 0 || m.Promo() != 0 {
+			moves[n], scores[n] = m, scores[j]
+			n++
+		}
+	}
+	return moves[:n], scores[:n]
+}
+
+// order ordena a lista inteira (usado na raiz, que reaproveita a ordem).
 func (t *thread) order(p *Position, moves []Move, ply int, first Move) {
 	var buf [256]int
 	scores := buf[:len(moves)]
@@ -232,10 +277,11 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 		best = stand
 	}
 
-	moves := p.GenerateMoves(!inCheck)
-	t.order(p, moves, ply, NoMove)
+	moves := p.generateInto(t.mbuf[ply][:0], !inCheck)
+	scores := t.score(p, moves, ply, NoMove)
 	legal := 0
-	for _, m := range moves {
+	for i := range moves {
+		m := pickNext(moves, scores, i)
 		if !inCheck {
 			// Delta pruning: nem ganhando a peça chega perto de alfa.
 			if m.Promo() == 0 && m&FlagEP == 0 && stand+seeValue[int(p.Board[m.To()])%6]+200 <= alpha {
@@ -245,13 +291,15 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 				continue
 			}
 		}
-		child, ok := p.Make(m)
+		child := &t.stack[ply+1]
+		var ok bool
+		*child, ok = p.Make(m)
 		if !ok {
 			continue
 		}
 		legal++
 		t.nn.push(ply, p, m)
-		score := -t.quiesce(&child, ply+1, -beta, -alpha)
+		score := -t.quiesce(child, ply+1, -beta, -alpha)
 		if t.s.stop.Load() {
 			return 0
 		}
@@ -330,10 +378,11 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		// Null move.
 		if allowNull && depth >= 3 && eval >= beta && p.hasNonPawn(p.Side) {
 			r := 3 + depth/5 + min((eval-beta)/200, 3)
-			null := p.MakeNull()
+			null := &t.stack[ply+1]
+			*null = p.MakeNull()
 			t.push(null.Hash)
 			t.nn.pushNull(ply)
-			score := -t.negamax(&null, depth-1-r, ply+1, -beta, -beta+1, false)
+			score := -t.negamax(null, depth-1-r, ply+1, -beta, -beta+1, false)
 			t.pop()
 			if s.stop.Load() {
 				return 0
@@ -348,21 +397,24 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		// ProbCut: uma captura boa que passa de beta com folga em busca rasa.
 		if depth >= 5 && beta < Mate-2*MaxPly {
 			rbeta := beta + 180
-			caps := p.GenerateMoves(true)
-			t.order(p, caps, ply, ttMove)
-			for _, m := range caps {
+			caps := p.generateInto(t.mbuf[ply][:0], true)
+			scores := t.score(p, caps, ply, ttMove)
+			for i := range caps {
+				m := pickNext(caps, scores, i)
 				if p.SEE(m) < rbeta-eval {
 					continue
 				}
-				child, ok := p.Make(m)
+				child := &t.stack[ply+1]
+				var ok bool
+				*child, ok = p.Make(m)
 				if !ok {
 					continue
 				}
 				t.push(child.Hash)
 				t.nn.push(ply, p, m)
-				score := -t.quiesce(&child, ply+1, -rbeta, -rbeta+1)
+				score := -t.quiesce(child, ply+1, -rbeta, -rbeta+1)
 				if score >= rbeta {
-					score = -t.negamax(&child, depth-4, ply+1, -rbeta, -rbeta+1, true)
+					score = -t.negamax(child, depth-4, ply+1, -rbeta, -rbeta+1, true)
 				}
 				t.pop()
 				if s.stop.Load() {
@@ -376,8 +428,8 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		}
 	}
 
-	moves := p.GenerateMoves(false)
-	t.order(p, moves, ply, ttMove)
+	moves := p.generateInto(t.mbuf[ply][:0], false)
+	scores := t.score(p, moves, ply, ttMove)
 
 	origAlpha := alpha
 	best, bestMove := -Inf, NoMove
@@ -385,15 +437,19 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	var quiets [64]Move
 	nQuiets := 0
 
-	for _, m := range moves {
+	for i := 0; i < len(moves); i++ {
+		m := pickNext(moves, scores, i)
 		quiet := m&FlagCapture == 0 && m.Promo() == 0
 		isKiller := m == t.killers[ply][0] || m == t.killers[ply][1]
 
 		// Podas em lances tardios (só depois de ter um lance que não perde de mate).
 		if ply > 0 && !inCheck && best > -Mate+2*MaxPly {
 			if quiet && !isKiller {
-				// Late move pruning.
+				// Late move pruning. A condição só fica mais verdadeira daqui
+				// em diante, e os killers vêm antes de qualquer quieto: todos os
+				// quietos restantes seriam podados, então saem da lista já.
 				if depth <= 6 && searched >= 3+depth*depth {
+					moves, scores = dropQuiets(moves, scores, i+1)
 					continue
 				}
 			} else if !quiet && depth <= 5 && p.SEE(m) < -90*depth {
@@ -401,7 +457,9 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			}
 		}
 
-		child, ok := p.Make(m)
+		child := &t.stack[ply+1]
+		var ok bool
+		*child, ok = p.Make(m)
 		if !ok {
 			continue
 		}
@@ -419,7 +477,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		t.nn.push(ply, p, m)
 		var score int
 		if searched == 1 {
-			score = -t.negamax(&child, depth-1, ply+1, -beta, -alpha, true)
+			score = -t.negamax(child, depth-1, ply+1, -beta, -alpha, true)
 		} else {
 			r := 0
 			if depth >= 3 && searched > 2 && !inCheck && !givesCheck && (quiet || p.SEE(m) < 0) {
@@ -435,12 +493,12 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				}
 				r = max(0, min(r, depth-2))
 			}
-			score = -t.negamax(&child, depth-1-r, ply+1, -alpha-1, -alpha, true)
+			score = -t.negamax(child, depth-1-r, ply+1, -alpha-1, -alpha, true)
 			if score > alpha && r > 0 {
-				score = -t.negamax(&child, depth-1, ply+1, -alpha-1, -alpha, true)
+				score = -t.negamax(child, depth-1, ply+1, -alpha-1, -alpha, true)
 			}
 			if score > alpha && score < beta {
-				score = -t.negamax(&child, depth-1, ply+1, -beta, -alpha, true)
+				score = -t.negamax(child, depth-1, ply+1, -beta, -alpha, true)
 			}
 		}
 		t.pop()
@@ -497,16 +555,17 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 func (t *thread) searchRoot(p *Position, moves []Move, depth, alpha, beta int) (int, Move) {
 	best, bestMove := -Inf, NoMove
 	for i, m := range moves {
-		child, _ := p.Make(m)
+		child := &t.stack[1]
+		*child, _ = p.Make(m)
 		t.push(child.Hash)
 		t.nn.push(0, p, m)
 		var score int
 		if i == 0 {
-			score = -t.negamax(&child, depth-1, 1, -beta, -alpha, true)
+			score = -t.negamax(child, depth-1, 1, -beta, -alpha, true)
 		} else {
-			score = -t.negamax(&child, depth-1, 1, -alpha-1, -alpha, true)
+			score = -t.negamax(child, depth-1, 1, -alpha-1, -alpha, true)
 			if score > alpha && score < beta {
-				score = -t.negamax(&child, depth-1, 1, -beta, -alpha, true)
+				score = -t.negamax(child, depth-1, 1, -beta, -alpha, true)
 			}
 		}
 		t.pop()
@@ -681,6 +740,7 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 
 	multiPV := max(1, min(s.MultiPV, len(rootMoves)))
 	prevScore := 0
+	partialScore := 0 // nota do melhor lance achado numa iteração interrompida
 	prevLines := []Line{}
 
 	for depth := 1; depth <= maxDepth; depth++ {
@@ -714,7 +774,7 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 				if move != NoMove {
 					main.order(p, moves, 0, move)
 					if pvIdx == 0 {
-						res.Best = move
+						res.Best, partialScore = move, score
 					}
 				}
 				if s.stop.Load() {
@@ -778,8 +838,30 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 	s.stop.Store(true)
 	wg.Wait()
 	res.Nodes, res.Time = s.totalNodes.Load()+main.nodes%256, time.Since(start)
+	// A iteração interrompida achou um lance melhor que o da última completa:
+	// joga esse lance, e a última linha "info" tem que mostrá-lo (a GUI e o
+	// fastchess esperam que o bestmove seja o começo da última PV).
 	if len(res.PV) == 0 || res.PV[0] != res.Best {
-		res.PV = []Move{res.Best}
+		if res.Depth > 0 {
+			res.Score = partialScore
+		}
+		res.PV = main.extractPV(p, res.Best, max(1, res.Depth))
+		if len(res.Lines) > 0 {
+			res.Lines[0] = Line{Move: res.Best, Score: res.Score, PV: res.PV}
+		}
+		if info != nil && res.Depth > 0 {
+			ms := res.Time.Milliseconds()
+			nps := uint64(0)
+			if ms > 0 {
+				nps = res.Nodes * 1000 / uint64(ms)
+			}
+			pvs := ""
+			for _, m := range res.PV {
+				pvs += " " + m.String()
+			}
+			info(fmt.Sprintf("info depth %d multipv 1 score %s nodes %d nps %d hashfull %d time %d pv%s",
+				res.Depth, ScoreString(res.Score), res.Nodes, nps, s.tt.Hashfull(), ms, pvs))
+		}
 	}
 	return res
 }

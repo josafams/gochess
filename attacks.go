@@ -69,13 +69,7 @@ func slide(d, sq int, occ Bitboard) Bitboard {
 	return att
 }
 
-func bishopAttacks(sq int, occ Bitboard) Bitboard {
-	return slide(2, sq, occ) | slide(3, sq, occ) | slide(6, sq, occ) | slide(7, sq, occ)
-}
-
-func rookAttacks(sq int, occ Bitboard) Bitboard {
-	return slide(0, sq, occ) | slide(1, sq, occ) | slide(4, sq, occ) | slide(5, sq, occ)
-}
+// bishopAttacks e rookAttacks: ver magic.go.
 
 // Attacked diz se a casa sq é atacada por alguma peça da cor `by`.
 // Truque: olha "de dentro para fora", gerando ataques a partir de sq.

@@ -26,6 +26,18 @@ type Net struct {
 	FB [nnHidden]int16
 	OW [2 * nnHidden]int16
 	OB int32
+
+	simd bool // AVX2 disponível e |OW| <= 128 (ver screluDotAVX2)
+}
+
+// prepare decide se a inferência pode usar os kernels AVX2.
+func (n *Net) prepare() {
+	n.simd = hasAVX2
+	for _, w := range n.OW {
+		if w > 128 || w < -128 {
+			n.simd = false
+		}
+	}
 }
 
 var currentNet *Net
@@ -59,6 +71,7 @@ func LoadNet(b []byte) (*Net, error) {
 		n.OW[j] = rd()
 	}
 	n.OB = int32(binary.LittleEndian.Uint32(b[off:]))
+	n.prepare()
 	return n, nil
 }
 
@@ -137,9 +150,22 @@ func screlu(x int16) int32 {
 func (n *Net) output(a *accumulator, side int) int {
 	var sum int64
 	us, them := &a[side], &a[side^1]
-	for j := 0; j < nnHidden; j++ {
-		sum += int64(screlu(us[j])) * int64(n.OW[j])
-		sum += int64(screlu(them[j])) * int64(n.OW[nnHidden+j])
+	if n.simd {
+		var lanes [8]int32
+		screluDotAVX2(&us[0], &n.OW[0], nnHidden, &lanes)
+		for _, l := range lanes {
+			sum += int64(l)
+		}
+		lanes = [8]int32{}
+		screluDotAVX2(&them[0], &n.OW[nnHidden], nnHidden, &lanes)
+		for _, l := range lanes {
+			sum += int64(l)
+		}
+	} else {
+		for j := 0; j < nnHidden; j++ {
+			sum += int64(screlu(us[j])) * int64(n.OW[j])
+			sum += int64(screlu(them[j])) * int64(n.OW[nnHidden+j])
+		}
 	}
 	v := (sum/nnQA + int64(n.OB)) * nnScale / (nnQA * nnQB)
 	return int(v)
@@ -252,15 +278,60 @@ func (st *nnueStack) evaluate(p *Position, ply int) int {
 	}
 	for j := i + 1; j <= ply; j++ {
 		e := &st.entries[j]
-		e.acc = st.entries[j-1].acc
-		for _, d := range e.deltas[:e.n] {
-			if d.add {
-				e.acc.add(st.net, d.color, d.pt, d.sq)
-			} else {
-				e.acc.sub(st.net, d.color, d.pt, d.sq)
-			}
-		}
+		st.apply(&e.acc, &st.entries[j-1].acc, e.deltas[:e.n])
 		e.computed = true
 	}
 	return st.net.output(&st.entries[ply].acc, p.Side)
+}
+
+// apply: dst = src com as mudanças de um lance. Os casos comuns (lance
+// quieto, captura, roque) passam pelos kernels fundidos: uma única passada
+// sobre o acumulador em vez de copiar e depois somar/subtrair coluna a coluna.
+func (st *nnueStack) apply(dst, src *accumulator, ds []delta) {
+	n := st.net
+	na, ns := 0, 0
+	for _, d := range ds {
+		if d.add {
+			na++
+		} else {
+			ns++
+		}
+	}
+	// Formatos possíveis: 1+1 (quieto, promoção), 1+2 (captura, en passant,
+	// promoção com captura), 2+2 (roque).
+	fast := n.simd && ((na == 1 && (ns == 1 || ns == 2)) || (na == 2 && ns == 2))
+	if !fast {
+		*dst = *src
+		for _, d := range ds {
+			if d.add {
+				dst.add(n, d.color, d.pt, d.sq)
+			} else {
+				dst.sub(n, d.color, d.pt, d.sq)
+			}
+		}
+		return
+	}
+	for v := 0; v < 2; v++ {
+		var a, s [2]*int16
+		ia, is := 0, 0
+		for _, d := range ds {
+			w := &n.FW[nnFeature(v, d.color, d.pt, d.sq)][0]
+			if d.add {
+				a[ia] = w
+				ia++
+			} else {
+				s[is] = w
+				is++
+			}
+		}
+		switch {
+		case ia == 1 && is == 1:
+			addSubAVX2(&dst[v][0], &src[v][0], a[0], s[0], nnHidden)
+		case ia == 1:
+			addSubSubAVX2(&dst[v][0], &src[v][0], a[0], s[0], s[1], nnHidden)
+		default:
+			addSubAVX2(&dst[v][0], &src[v][0], a[0], s[0], nnHidden)
+			addSubAVX2(&dst[v][0], &dst[v][0], a[1], s[1], nnHidden)
+		}
+	}
 }

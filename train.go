@@ -222,9 +222,11 @@ func (n *floatNet) quantize() *Net {
 		q.FB[j] = int16(r(float64(n.FB[j]) * nnQA))
 	}
 	for j := 0; j < 2*nnHidden; j++ {
-		q.OW[j] = int16(r(float64(n.OW[j]) * nnQB))
+		// |OW| <= 128 permite o kernel AVX2 (v*w cabe em int16).
+		q.OW[j] = int16(max(-128, min(128, r(float64(n.OW[j])*nnQB))))
 	}
 	q.OB = int32(r(float64(n.OB) * nnQA * nnQB))
+	q.prepare()
 	return q
 }
 
