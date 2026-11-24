@@ -24,6 +24,7 @@ type APIRequest struct {
 	Inc     int      `json:"inc,omitempty"`
 	PGN     string   `json:"pgn,omitempty"` // action "pgn": importa lances em SAN
 	Book    bool     `json:"book,omitempty"`
+	Engine  string   `json:"engine,omitempty"` // adversário (só no servidor local): gochess, sf17, sf19...
 }
 
 type APILine struct {

@@ -83,7 +83,7 @@
 
   const st = {
     startFen: '', moves: [], view: 0, shown: null, live: null,
-    mode: 'play', human: 'w', flipped: false, level: 4, tc: '',
+    mode: 'play', human: 'w', flipped: false, level: 4, tc: '', opp: 'gochess',
     clock: { w: 0, b: 0, running: null, since: 0 }, flag: null,
     selected: null, hint: null, thinking: false, gen: 0, info: null, analysis: null,
     showResult: true, anim: null, cache: new Map()
@@ -91,10 +91,15 @@
   const startSide = () => (st.startFen ? st.startFen.split(' ')[1] : 'w');
   const turnAt = n => (n % 2 === 0 ? startSide() : other(startSide()));
 
+  function oppName() {
+    const e = (window.GOCHESS_ENGINES || []).find(e => e.id === st.opp);
+    return e ? e.name : 'Engine';
+  }
+
   function save() {
     try {
       localStorage.setItem(STORE, JSON.stringify({
-        startFen: st.startFen, moves: st.moves, human: st.human, level: st.level,
+        startFen: st.startFen, moves: st.moves, human: st.human, level: st.level, opp: st.opp,
         flipped: st.flipped, mode: st.mode, tc: st.tc, clock: { w: st.clock.w, b: st.clock.b }
       }));
     } catch (e) {}
@@ -105,7 +110,7 @@
       if (!s || !Array.isArray(s.moves)) return;
       Object.assign(st, {
         startFen: s.startFen || '', moves: s.moves, human: s.human || 'w', level: s.level || 4,
-        flipped: !!s.flipped, mode: s.mode === 'analysis' ? 'analysis' : 'play', tc: s.tc || ''
+        flipped: !!s.flipped, mode: s.mode === 'analysis' ? 'analysis' : 'play', tc: s.tc || '', opp: s.opp || 'gochess'
       });
       if (s.clock) { st.clock.w = s.clock.w; st.clock.b = s.clock.b; }
     } catch (e) {}
@@ -155,7 +160,7 @@
     st.thinking = true;
     startClock(st.live.turn);
     render();
-    const req = { action: 'think', fen: st.startFen || undefined, moves: st.moves.slice(), level: st.level, book: true };
+    const req = { action: 'think', fen: st.startFen || undefined, moves: st.moves.slice(), level: st.level, book: st.opp === 'gochess', engine: st.opp };
     if (st.tc) {
       const inc = +st.tc.split('+')[1] * 1000;
       req.wtime = Math.max(1, Math.round(currentClock('w')));
@@ -192,6 +197,7 @@
     st.human = c === 'r' ? (Math.random() < 0.5 ? 'w' : 'b') : c;
     st.flipped = st.human === 'b';
     st.level = +$('level').value;
+    st.opp = $('opponent').value || 'gochess';
     st.tc = $('tc').value;
     st.startFen = '';
     st.moves = [];
@@ -484,7 +490,7 @@
     if ($('color').value !== 'r') $('color').value = st.human;
     $('level').value = String(st.level);
     $('tc').value = st.tc;
-    for (const id of ['color', 'level', 'tc', 'hint']) $(id).closest('label, button').classList.toggle('play-only', true);
+    for (const id of ['color', 'opponent', 'level', 'tc', 'hint']) $(id).closest('label, button').classList.toggle('play-only', true);
 
     // Súmula: cada lance é um botão que leva àquela posição.
     const san = st.live ? st.live.san : [];
@@ -524,7 +530,7 @@
 
   function renderClocks() {
     const bottom = st.flipped ? 'b' : 'w', top = other(bottom);
-    const name = c => (st.mode === 'analysis' ? (c === 'w' ? 'Brancas' : 'Pretas') : (c === st.human ? 'Você' : 'Engine'));
+    const name = c => (st.mode === 'analysis' ? (c === 'w' ? 'Brancas' : 'Pretas') : (c === st.human ? 'Você' : oppName()));
     $('top-name').textContent = name(top);
     $('bottom-name').textContent = name(bottom);
     for (const [id, c] of [['clock-top', top], ['clock-bottom', bottom]]) {
@@ -545,7 +551,7 @@
     const a = st.mode === 'analysis' ? st.analysis : st.info;
     const lines = $('lines');
     const pv = $('engine-pv');
-    $('engine-title').textContent = st.mode === 'analysis' ? 'Análise' : 'Engine';
+    $('engine-title').textContent = st.mode === 'analysis' ? 'Análise' : oppName();
     let pct = 50, text = '0.0';
     if (a && a.depth) {
       if (a.mateIn) { pct = a.mateIn > 0 ? 100 : 0; text = 'M' + Math.abs(a.mateIn); }
@@ -684,6 +690,13 @@
   load();
   if (!st.tc) resetClock();
   st.view = st.moves.length;
+  const engines = window.GOCHESS_ENGINES || [];
+  if (engines.length > 1) {
+    for (const e of engines) $('opponent').add(new Option(e.name, e.id));
+    if (!engines.some(e => e.id === st.opp)) st.opp = 'gochess';
+    $('opponent').value = st.opp;
+    $('engine-field').hidden = false;
+  } else st.opp = 'gochess';
   $('level').value = String(st.level);
   $('color').value = st.human;
   $('tc').value = st.tc;

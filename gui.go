@@ -15,13 +15,15 @@ import (
 var webFiles embed.FS
 
 // runGUI serve a interface web e a API em /api.
-func runGUI(addr string) error {
+func runGUI(addr, netPath string) error {
+	detectGUIEngines(netPath)
 	sub, _ := fs.Sub(webFiles, "web")
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 	mux.HandleFunc("/config.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript")
-		fmt.Fprint(w, "window.GOCHESS_BACKEND = 'http';")
+		list, _ := json.Marshal(guiEngines)
+		fmt.Fprintf(w, "window.GOCHESS_BACKEND = 'http';\nwindow.GOCHESS_ENGINES = %s;", list)
 	})
 	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -34,6 +36,10 @@ func runGUI(addr string) error {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if ge := findGUIEngine(req.Engine); req.Action == "think" && ge != nil && ge.path != "" {
+			json.NewEncoder(w).Encode(externalThink(ge, req))
+			return
+		}
 		json.NewEncoder(w).Encode(HandleAPI(req))
 	})
 	log.Printf("GoChess rodando em http://%s", addr)

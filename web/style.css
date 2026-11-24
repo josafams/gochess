@@ -153,6 +153,7 @@ textarea {
 .sheet-buttons { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center }
 .pos-error { color: #ffb4a6; min-height: 1.2em; font-size: 14px }
 .field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); font-weight: 500 }
+.field[hidden] { display: none }
 select {
   height: 44px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line);
   background: var(--bg); font-size: 16px; color: var(--ink);

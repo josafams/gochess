@@ -49,8 +49,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "gui" {
 		fs := flag.NewFlagSet("gui", flag.ExitOnError)
 		addr := fs.String("addr", "localhost:8080", "endereço do servidor")
+		net := fs.String("net", "gochess-768x256.nnue", "rede NNUE do adversário \"GoChess + NNUE\" (se existir)")
 		fs.Parse(os.Args[2:])
-		if err := runGUI(*addr); err != nil {
+		if err := runGUI(*addr, *net); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
