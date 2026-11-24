@@ -35,4 +35,14 @@ Treino: 252 milhões de posições (base de avaliações do Lichess, CC0, + 13,7
 SPRT [0, 5] contra a versão tunada, 8+0.08: **H1 aceita, +238 ± 37 Elo**
 (392 partidas, +293 =39 −60, 79,7%).
 
-Estimativa: **~2900** (falta confirmar contra o Stockfish 2700/3000).
+| Adversário | Placar (+ = −) | Pontos | Elo de diferença (95%) |
+|---|---|---|---|
+| SF 2700 (100) | +73 =12 −15 | 79% | +230 [+162, +319] |
+| SF 3000 (100) | +13 =23 −64 | 24,5% | −196 [−269, −135] |
+
+Estimativa: **~2850–2900** (a escala do SF limitado não é linear: 2930 pelo 2700, 2800 pelo 3000).
+
+## Velocidade (commit 3a09f76) — 24/11/2026
+
+`gochess bench` (40 posições, profundidade 12, 1 thread; a assinatura de nós não mudou: 12651361):
+553 mil → **2,45 milhões nps** (AVX2 na NNUE, magic bitboards, zero alocação, escolha preguiçosa de lances).
