@@ -80,7 +80,10 @@ type thread struct {
 	sbuf    [MaxPly + 2][256]int  // notas de ordenação de cada ply
 	qbuf    [MaxPly + 2][256]Move // lances quietos (geração em etapas)
 	qsbuf   [MaxPly + 2][256]int
-	evals   [MaxPly + 2]int // eval estática de cada ply (evalNone em xeque)
+	evals   [MaxPly + 2]int      // eval estática de cada ply (evalNone em xeque)
+	seeM    [MaxPly + 2][32]Move // SEE já calculados no nó de cada ply
+	seeV    [MaxPly + 2][32]int
+	seeN    [MaxPly + 2]int
 }
 
 func NewSearcher(hashMB int) *Searcher {
@@ -151,6 +154,24 @@ func (t *thread) evaluate(p *Position, ply int) int {
 	return Evaluate(p)
 }
 
+// see: SEE do lance, guardado por nó (a ordenação, as podas e o LMR pedem o
+// mesmo valor várias vezes).
+func (t *thread) see(p *Position, m Move, ply int) int {
+	n := t.seeN[ply]
+	ms := &t.seeM[ply]
+	for i := 0; i < n; i++ {
+		if ms[i] == m {
+			return t.seeV[ply][i]
+		}
+	}
+	v := p.SEE(m)
+	if n < len(ms) {
+		ms[n], t.seeV[ply][n] = m, v
+		t.seeN[ply] = n + 1
+	}
+	return v
+}
+
 // Ordenação: lance da TT > promoção a dama > boas capturas (MVV-LVA)
 // > killers > lances quietos pelo histórico > capturas perdedoras.
 func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
@@ -167,7 +188,7 @@ func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
 		}
 		pc := int(p.Board[m.From()])
 		mvv := victim*1000 + int(t.capHist[pc][m.To()][victim])/8
-		if p.SEE(m) >= 0 {
+		if t.see(p, m, ply) >= 0 {
 			return 300_000 + mvv
 		}
 		return -300_000 + mvv
@@ -301,6 +322,7 @@ func dropQuiets(moves []Move, scores []int, from int) ([]Move, []int) {
 
 // order ordena a lista inteira (usado na raiz, que reaproveita a ordem).
 func (t *thread) order(p *Position, moves []Move, ply int, first Move) {
+	t.seeN[ply] = 0 // a raiz não passa por negamax: zera o cache aqui
 	var buf [256]int
 	scores := buf[:len(moves)]
 	for i, m := range moves {
@@ -340,6 +362,7 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 	if t.checkStop() {
 		return 0
 	}
+	t.seeN[ply] = 0
 	if ply >= MaxPly-1 {
 		return t.evaluate(p, ply)
 	}
@@ -396,7 +419,7 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 			if m.Promo() == 0 && m&FlagEP == 0 && stand+seeValue[int(p.Board[m.To()])%6]+200 <= alpha {
 				continue
 			}
-			if p.SEE(m) < 0 {
+			if t.see(p, m, ply) < 0 {
 				continue
 			}
 		}
@@ -442,6 +465,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	if t.checkStop() {
 		return 0
 	}
+	t.seeN[ply] = 0
 	pvNode := beta-alpha > 1
 
 	if p.Halfmove >= 100 || t.isRepetition(p.Halfmove) || p.InsufficientMaterial() {
@@ -548,7 +572,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			scores := t.score(p, caps, ply, ttMove)
 			for i := range caps {
 				m := pickNext(caps, scores, i)
-				if p.SEE(m) < rbeta-eval {
+				if t.see(p, m, ply) < rbeta-eval {
 					continue
 				}
 				child := &t.stack[ply+1]
@@ -608,7 +632,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 					pk.skipQuiets()
 					continue
 				}
-			} else if !quiet && depth <= 5 && p.SEE(m) < -90*depth {
+			} else if !quiet && depth <= 5 && t.see(p, m, ply) < -90*depth {
 				continue
 			}
 		}
@@ -641,7 +665,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			score = -t.negamax(child, depth-1, ply+1, -beta, -alpha, true)
 		} else {
 			r := 0
-			if depth >= 3 && searched > 2 && !inCheck && !givesCheck && (quiet || p.SEE(m) < 0) {
+			if depth >= 3 && searched > 2 && !inCheck && !givesCheck && (quiet || t.see(p, m, ply) < 0) {
 				r = lmrTable[min(depth, 63)][min(searched, 63)]
 				if pvNode {
 					r--
