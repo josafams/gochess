@@ -355,6 +355,8 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 		}
 	}
 	inCheck := p.InCheck()
+	var pinned Bitboard // peças cravadas, calculadas no primeiro lance
+	havePins := false
 	best := -Inf
 	stand, raw := 0, evalNone
 	if !inCheck {
@@ -400,7 +402,10 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 		}
 		child := &t.stack[ply+1]
 		var ok bool
-		*child, ok = p.Make(m)
+		if !havePins {
+			pinned, havePins = p.pinned(), true
+		}
+		*child, ok = p.MakeFast(m, pinned, inCheck)
 		if !ok {
 			continue
 		}
@@ -453,6 +458,8 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	}
 
 	inCheck := p.InCheck()
+	var pinned Bitboard // peças cravadas, calculadas no primeiro lance
+	havePins := false
 	if inCheck {
 		depth++
 	}
@@ -546,7 +553,10 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				}
 				child := &t.stack[ply+1]
 				var ok bool
-				*child, ok = p.Make(m)
+				if !havePins {
+					pinned, havePins = p.pinned(), true
+				}
+				*child, ok = p.MakeFast(m, pinned, inCheck)
 				if !ok {
 					continue
 				}
@@ -605,7 +615,10 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 
 		child := &t.stack[ply+1]
 		var ok bool
-		*child, ok = p.Make(m)
+		if !havePins {
+			pinned, havePins = p.pinned(), true
+		}
+		*child, ok = p.MakeFast(m, pinned, inCheck)
 		if !ok {
 			continue
 		}

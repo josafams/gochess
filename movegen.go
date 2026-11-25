@@ -163,6 +163,12 @@ func init() {
 // Make devolve a nova posição e se o lance é legal (o rei de quem jogou não
 // ficou em xeque).
 func (p *Position) Make(m Move) (Position, bool) {
+	n := p.makeMove(m)
+	return n, !n.Attacked(lsb(n.Pieces[p.Side][King]), n.Side)
+}
+
+// makeMove faz o lance sem testar se o rei ficou em xeque.
+func (p *Position) makeMove(m Move) Position {
 	n := *p
 	us, them := n.Side, n.Side^1
 	from, to := m.From(), m.To()
@@ -226,8 +232,7 @@ func (p *Position) Make(m Move) (Position, bool) {
 	}
 	n.Side = them
 	n.Hash ^= sideKey
-
-	return n, !n.Attacked(lsb(n.Pieces[us][King]), them)
+	return n
 }
 
 // MakeNull passa a vez sem mexer peça (usado no null move pruning).
