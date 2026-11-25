@@ -78,7 +78,9 @@ type thread struct {
 	mbuf    [MaxPly + 2][256]Move // lista de lances de cada ply
 	stack   [MaxPly + 2]Position  // posição de cada ply (evita alocar no heap)
 	sbuf    [MaxPly + 2][256]int  // notas de ordenação de cada ply
-	evals   [MaxPly + 2]int       // eval estática de cada ply (evalNone em xeque)
+	qbuf    [MaxPly + 2][256]Move // lances quietos (geração em etapas)
+	qsbuf   [MaxPly + 2][256]int
+	evals   [MaxPly + 2]int // eval estática de cada ply (evalNone em xeque)
 }
 
 func NewSearcher(hashMB int) *Searcher {
@@ -530,8 +532,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		}
 	}
 
-	moves := p.generateInto(t.mbuf[ply][:0], false)
-	scores := t.score(p, moves, ply, ttMove)
+	pk := picker{ttMove: ttMove}
 
 	origAlpha := alpha
 	best, bestMove := -Inf, NoMove
@@ -541,8 +542,11 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	var captures [32]Move
 	nCaptures := 0
 
-	for i := 0; i < len(moves); i++ {
-		m := pickNext(moves, scores, i)
+	for {
+		m := t.nextMove(&pk, p, ply)
+		if m == NoMove {
+			break
+		}
 		quiet := m&FlagCapture == 0 && m.Promo() == 0
 		isKiller := m == t.killers[ply][0] || m == t.killers[ply][1]
 
@@ -553,7 +557,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				// em diante, e os killers vêm antes de qualquer quieto: todos os
 				// quietos restantes seriam podados, então saem da lista já.
 				if depth <= 6 && searched >= (3+depth*depth)/(2-imp) {
-					moves, scores = dropQuiets(moves, scores, i+1)
+					pk.skipQuiets()
 					continue
 				}
 			} else if !quiet && depth <= 5 && p.SEE(m) < -90*depth {
