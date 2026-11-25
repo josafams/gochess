@@ -1,6 +1,6 @@
-//go:build !h512
+//go:build h256
 
 package main
 
-// Tamanho da camada oculta. Compile com -tags h512 para a rede 768→512.
+// Rede antiga 768→256 (go build -tags h256), para comparar com a v1.
 const nnHidden = 256

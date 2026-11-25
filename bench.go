@@ -15,7 +15,7 @@ import (
 // O total de nós é a "assinatura" da busca: otimizações de velocidade não
 // podem mudá-lo; o NPS mede a velocidade.
 //
-//	gochess bench [-depth 13] [-net nnue-v1.nnue] [-cpuprofile cpu.out]
+//	gochess bench [-depth 13] [-net gochess-768x512.nnue] [-cpuprofile cpu.out]
 var benchFENs = []string{
 	"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
 	"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
@@ -62,7 +62,7 @@ var benchFENs = []string{
 func runBench(args []string) {
 	fs := flag.NewFlagSet("bench", flag.ExitOnError)
 	depth := fs.Int("depth", 12, "profundidade de cada busca")
-	netPath := fs.String("net", "nnue-v1.nnue", "rede NNUE (\"\" = avaliação clássica)")
+	netPath := fs.String("net", "gochess-768x512.nnue", "rede NNUE (\"\" = avaliação clássica)")
 	cpuprofile := fs.String("cpuprofile", "", "grava o perfil de CPU (go tool pprof)")
 	hash := fs.Int("hash", 16, "tabela de transposição (MB)")
 	memprofile := fs.String("memprofile", "", "grava o perfil de alocações (go tool pprof -sample_index=alloc_space)")
