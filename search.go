@@ -369,6 +369,7 @@ func (t *thread) quiesce(p *Position, ply, alpha, beta int) int {
 		if !ok {
 			continue
 		}
+		t.s.tt.prefetch(child.Hash)
 		legal++
 		t.nn.push(ply, p, m)
 		score := -t.quiesce(child, ply+1, -beta, -alpha)
@@ -482,6 +483,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			r := 3 + depth/5 + min((eval-beta)/200, 3)
 			null := &t.stack[ply+1]
 			*null = p.MakeNull()
+			s.tt.prefetch(null.Hash)
 			t.played[ply] = -1
 			t.push(null.Hash)
 			t.nn.pushNull(ply)
@@ -513,6 +515,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				if !ok {
 					continue
 				}
+				t.s.tt.prefetch(child.Hash)
 				t.played[ply] = int(p.Board[m.From()])*64 + m.To()
 				t.push(child.Hash)
 				t.nn.push(ply, p, m)
@@ -571,6 +574,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		if !ok {
 			continue
 		}
+		t.s.tt.prefetch(child.Hash)
 		legal++
 		givesCheck := child.InCheck()
 
@@ -798,6 +802,7 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 		s.workers = append(s.workers, s.newThread(len(s.workers)))
 	}
 	s.totalNodes.Store(0)
+	s.tt.NewSearch()
 	s.nodeLimit = lim.Nodes
 	s.setupTime(p, lim)
 	start := time.Now()
