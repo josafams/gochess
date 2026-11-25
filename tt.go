@@ -76,7 +76,7 @@ func (t *TT) prefetch(key uint64) {
 // dados: lance (20) | nota+offset (17) | profundidade (7) | tipo (2) | idade (2) | eval (16)
 func packTT(m Move, score, depth, flag, eval int, age uint32) uint64 {
 	depth = max(0, min(127, depth))
-	score = max(1-ttScoreOffset, min(ttScoreOffset-1, score)) // ±Inf cabe em 17 bits
+	score = max(1-ttScoreOffset, min(ttScoreOffset-1, score)) // ±Inf não cabe em 17 bits: vira ±65535, ainda além de qualquer nota de mate
 	eval = max(evalNone, min(32767, eval))
 	return uint64(m)&0xFFFFF | uint64(score+ttScoreOffset)&0x1FFFF<<20 | uint64(depth)<<37 | uint64(flag)<<44 |
 		uint64(age&3)<<46 | uint64(uint16(int16(eval)))<<48

@@ -885,6 +885,7 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 
 	// Threads auxiliares.
 	var wg sync.WaitGroup
+	first := res.Best // cópia: a thread principal reescreve res.Best durante a busca
 	for i := 1; i < threads; i++ {
 		w := s.workers[i]
 		w.nodes = 0
@@ -895,7 +896,7 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 		go func(w *thread) {
 			defer wg.Done()
 			moves := append([]Move(nil), rootMoves...)
-			best := res.Best
+			best := first
 			for d := 1 + w.id%2; d <= maxDepth && !s.stop.Load(); d++ {
 				w.order(p, moves, 0, best)
 				_, m := w.searchRoot(p, moves, d, -Inf, Inf)
