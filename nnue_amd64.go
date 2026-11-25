@@ -14,6 +14,9 @@ func addSubSubAVX2(dst, src, add, sub1, sub2 *int16, n int)
 //go:noescape
 func screluDotAVX2(x, w *int16, n int, out *[8]int32)
 
+//go:noescape
+func screluDot2AVX2(us, them, w *int16, n int) int64
+
 // hasAVX2: CPU com AVX2 e sistema salvando os registradores YMM.
 var hasAVX2 = func() bool {
 	max, _, _, _ := cpuid(0, 0)

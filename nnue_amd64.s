@@ -100,3 +100,74 @@ sd_loop:
 	VMOVDQU Y5, (DX)
 	VZEROUPPER
 	RET
+
+// func screluDot2AVX2(us, them, w *int16, n int) int64
+// Soma de clamp(us,0,255)²·w[0:n] + clamp(them,0,255)²·w[n:2n], numa chamada só.
+// Quatro acumuladores independentes (2 por perspectiva, 2 blocos de 16 por
+// volta) para não esperar a soma anterior terminar a cada instrução.
+TEXT ·screluDot2AVX2(SB), NOSPLIT, $0-40
+	MOVQ us+0(FP), SI
+	MOVQ them+8(FP), DI
+	MOVQ w+16(FP), AX
+	MOVQ n+24(FP), CX
+	LEAQ (AX)(CX*2), BX          // w + n (int16)
+	SHRQ $5, CX                  // voltas de 32 elementos
+	VPXOR Y8, Y8, Y8
+	VPXOR Y9, Y9, Y9
+	VPXOR Y10, Y10, Y10
+	VPXOR Y11, Y11, Y11
+	VPXOR Y6, Y6, Y6
+	MOVQ $0x00ff00ff00ff00ff, R8
+	MOVQ R8, X7
+	VPBROADCASTQ X7, Y7
+d2_loop:
+	VMOVDQU  (SI), Y0
+	VMOVDQU  32(SI), Y1
+	VMOVDQU  (DI), Y2
+	VMOVDQU  32(DI), Y3
+	VPMAXSW  Y6, Y0, Y0
+	VPMAXSW  Y6, Y1, Y1
+	VPMAXSW  Y6, Y2, Y2
+	VPMAXSW  Y6, Y3, Y3
+	VPMINSW  Y7, Y0, Y0
+	VPMINSW  Y7, Y1, Y1
+	VPMINSW  Y7, Y2, Y2
+	VPMINSW  Y7, Y3, Y3
+	VPMULLW  (AX), Y0, Y12
+	VPMULLW  32(AX), Y1, Y13
+	VPMULLW  (BX), Y2, Y14
+	VPMULLW  32(BX), Y3, Y15
+	VPMADDWD Y12, Y0, Y12
+	VPMADDWD Y13, Y1, Y13
+	VPMADDWD Y14, Y2, Y14
+	VPMADDWD Y15, Y3, Y15
+	VPADDD   Y12, Y8, Y8
+	VPADDD   Y13, Y9, Y9
+	VPADDD   Y14, Y10, Y10
+	VPADDD   Y15, Y11, Y11
+	ADDQ $64, SI
+	ADDQ $64, DI
+	ADDQ $64, AX
+	ADDQ $64, BX
+	DECQ CX
+	JNZ  d2_loop
+	// Soma horizontal das 32 lanes de int32 em int64.
+	VPADDD   Y9, Y8, Y8
+	VPADDD   Y11, Y10, Y10
+	VPMOVSXDQ X8, Y0             // lanes 0-3 de Y8 em int64
+	VEXTRACTI128 $1, Y8, X1
+	VPMOVSXDQ X1, Y1
+	VPMOVSXDQ X10, Y2
+	VEXTRACTI128 $1, Y10, X3
+	VPMOVSXDQ X3, Y3
+	VPADDQ   Y1, Y0, Y0
+	VPADDQ   Y3, Y2, Y2
+	VPADDQ   Y2, Y0, Y0
+	VEXTRACTI128 $1, Y0, X1
+	VPADDQ   X1, X0, X0
+	VPSHUFD  $0x4e, X0, X1
+	VPADDQ   X1, X0, X0
+	VMOVQ    X0, R9
+	MOVQ     R9, ret+32(FP)
+	VZEROUPPER
+	RET

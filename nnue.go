@@ -151,16 +151,7 @@ func (n *Net) output(a *accumulator, side int) int {
 	var sum int64
 	us, them := &a[side], &a[side^1]
 	if n.simd {
-		var lanes [8]int32
-		screluDotAVX2(&us[0], &n.OW[0], nnHidden, &lanes)
-		for _, l := range lanes {
-			sum += int64(l)
-		}
-		lanes = [8]int32{}
-		screluDotAVX2(&them[0], &n.OW[nnHidden], nnHidden, &lanes)
-		for _, l := range lanes {
-			sum += int64(l)
-		}
+		sum = screluDot2AVX2(&us[0], &them[0], &n.OW[0], nnHidden)
 	} else {
 		for j := 0; j < nnHidden; j++ {
 			sum += int64(screlu(us[j])) * int64(n.OW[j])

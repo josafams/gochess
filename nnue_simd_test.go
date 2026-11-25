@@ -66,3 +66,29 @@ func TestNNUESIMD(t *testing.T) {
 		}
 	}
 }
+
+// screluDot2AVX2 tem de dar exatamente a soma escalar das duas perspectivas.
+func TestScreluDot2AVX2(t *testing.T) {
+	if !hasAVX2 {
+		t.Skip("sem AVX2")
+	}
+	r := rand.New(rand.NewSource(3))
+	for iter := 0; iter < 200; iter++ {
+		us, them := make([]int16, nnHidden), make([]int16, nnHidden)
+		w := make([]int16, 2*nnHidden)
+		for i := range us {
+			us[i] = int16(r.Intn(700) - 200)
+			them[i] = int16(r.Intn(700) - 200)
+		}
+		for i := range w {
+			w[i] = int16(r.Intn(257) - 128)
+		}
+		var want int64
+		for j := 0; j < nnHidden; j++ {
+			want += int64(screlu(us[j]))*int64(w[j]) + int64(screlu(them[j]))*int64(w[nnHidden+j])
+		}
+		if got := screluDot2AVX2(&us[0], &them[0], &w[0], nnHidden); got != want {
+			t.Fatalf("iteração %d: %d != %d", iter, got, want)
+		}
+	}
+}
