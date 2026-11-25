@@ -8,7 +8,7 @@ gochess:
 	GOAMD64=v3 $(GO) build -o gochess .
 
 portable:
-	$(GO) build -o gochess-portable .
+	GOAMD64=v1 $(GO) build -o gochess-portable .
 
 h512:
 	GOAMD64=v3 $(GO) build -tags h512 -o gochess-h512 .
