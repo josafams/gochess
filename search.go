@@ -65,22 +65,23 @@ type Searcher struct {
 
 // thread guarda o estado de cada thread de busca (Lazy SMP).
 type thread struct {
-	s       *Searcher
-	id      int
-	nodes   uint64
-	killers [MaxPly + 2][2]Move
-	hist    [2][64][64]int
-	capHist [12][64][6]int  // [peça][destino][vítima]
-	cont    [768][768]int16 // [peça*64+destino anterior][peça*64+destino]
-	played  [MaxPly + 2]int // peça*64+destino do lance feito em cada ply (-1 = null)
-	path    []uint64
-	nn      *nnueStack
-	mbuf    [MaxPly + 2][256]Move // lista de lances de cada ply
-	stack   [MaxPly + 2]Position  // posição de cada ply (evita alocar no heap)
-	sbuf    [MaxPly + 2][256]int  // notas de ordenação de cada ply
-	qbuf    [MaxPly + 2][256]Move // lances quietos (geração em etapas)
-	qsbuf   [MaxPly + 2][256]int
-	evals   [MaxPly + 2]int // eval estática de cada ply (evalNone em xeque)
+	s        *Searcher
+	id       int
+	nodes    uint64
+	killers  [MaxPly + 2][2]Move
+	hist     [2][64][64]int
+	capHist  [12][64][6]int   // [peça][destino][vítima]
+	cont     [768][768]int16  // [peça*64+destino anterior][peça*64+destino]
+	played   [MaxPly + 2]int  // peça*64+destino do lance feito em cada ply (-1 = null)
+	excluded [MaxPly + 2]Move // lance excluído na busca de singularidade deste ply
+	path     []uint64
+	nn       *nnueStack
+	mbuf     [MaxPly + 2][256]Move // lista de lances de cada ply
+	stack    [MaxPly + 2]Position  // posição de cada ply (evita alocar no heap)
+	sbuf     [MaxPly + 2][256]int  // notas de ordenação de cada ply
+	qbuf     [MaxPly + 2][256]Move // lances quietos (geração em etapas)
+	qsbuf    [MaxPly + 2][256]int
+	evals    [MaxPly + 2]int // eval estática de cada ply (evalNone em xeque)
 }
 
 func NewSearcher(hashMB int) *Searcher {
@@ -425,11 +426,12 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	}
 
 	s := t.s
+	excluded := t.excluded[ply]
 	ttMove := NoMove
 	tte, ttHit := s.tt.probe(p.Hash)
 	if e, ok := tte, ttHit; ok {
 		ttMove = e.move
-		if !pvNode && e.depth >= depth {
+		if !pvNode && excluded == NoMove && e.depth >= depth {
 			score := scoreFromTT(e.score, ply)
 			switch {
 			case e.flag == ttExact,
@@ -440,7 +442,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		}
 	}
 	// IIR: sem lance da tabela, reduz um pouco (ordenação será pior de qualquer jeito).
-	if ttMove == NoMove && depth >= 4 {
+	if ttMove == NoMove && depth >= 4 && excluded == NoMove {
 		depth--
 	}
 
@@ -472,7 +474,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		imp = 1
 	}
 
-	if !pvNode && !inCheck {
+	if !pvNode && !inCheck && excluded == NoMove {
 		// Reverse futility.
 		if depth <= 6 && eval-80*(depth-imp) >= beta && beta > -Mate+2*MaxPly && beta < Mate-2*MaxPly {
 			return eval
@@ -547,8 +549,38 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		if m == NoMove {
 			break
 		}
+		if m == excluded {
+			continue
+		}
 		quiet := m&FlagCapture == 0 && m.Promo() == 0
 		isKiller := m == t.killers[ply][0] || m == t.killers[ply][1]
+
+		// Singular extension: se o lance da TT é muito melhor que todos os
+		// outros (uma busca rasa sem ele não chega perto da nota dele), ele é
+		// "singular" e merece ser buscado um ply mais fundo.
+		ext := 0
+		if m == ttMove && excluded == NoMove && ply > 0 && depth >= 8 && ttHit &&
+			tte.flag != ttUpper && tte.depth >= depth-3 &&
+			tte.score > -Mate+2*MaxPly && tte.score < Mate-2*MaxPly {
+			ttScore := scoreFromTT(tte.score, ply)
+			sBeta := ttScore - 2*depth
+			t.excluded[ply] = m
+			sScore := t.negamax(p, (depth-1)/2, ply, sBeta-1, sBeta, false)
+			t.excluded[ply] = NoMove
+			if s.stop.Load() {
+				return 0
+			}
+			switch {
+			case sScore < sBeta:
+				ext = 1
+			case sBeta >= beta:
+				// Multi-cut: mesmo sem o lance da TT outro lance passa de beta.
+				return sBeta
+			case ttScore >= beta:
+				ext = -1 // há alternativas boas: busca o lance da TT mais raso
+			}
+		}
+		newDepth := depth - 1 + ext
 
 		// Podas em lances tardios (só depois de ter um lance que não perde de mate).
 		if ply > 0 && !inCheck && best > -Mate+2*MaxPly {
@@ -586,7 +618,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 		t.nn.push(ply, p, m)
 		var score int
 		if searched == 1 {
-			score = -t.negamax(child, depth-1, ply+1, -beta, -alpha, true)
+			score = -t.negamax(child, newDepth, ply+1, -beta, -alpha, true)
 		} else {
 			r := 0
 			if depth >= 3 && searched > 2 && !inCheck && !givesCheck && (quiet || p.SEE(m) < 0) {
@@ -603,14 +635,14 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 				if quiet {
 					r -= t.quietScore(p, m, ply) / 8000
 				}
-				r = max(0, min(r, depth-2))
+				r = max(0, min(r, newDepth-1))
 			}
-			score = -t.negamax(child, depth-1-r, ply+1, -alpha-1, -alpha, true)
+			score = -t.negamax(child, newDepth-r, ply+1, -alpha-1, -alpha, true)
 			if score > alpha && r > 0 {
-				score = -t.negamax(child, depth-1, ply+1, -alpha-1, -alpha, true)
+				score = -t.negamax(child, newDepth, ply+1, -alpha-1, -alpha, true)
 			}
 			if score > alpha && score < beta {
-				score = -t.negamax(child, depth-1, ply+1, -beta, -alpha, true)
+				score = -t.negamax(child, newDepth, ply+1, -beta, -alpha, true)
 			}
 		}
 		t.pop()
@@ -653,6 +685,9 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	}
 
 	if legal == 0 {
+		if excluded != NoMove {
+			return alpha // o único lance legal era o excluído: não é mate
+		}
 		if inCheck {
 			return -Mate + ply
 		}
@@ -660,6 +695,9 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 	}
 	if best == -Inf { // todos os lances podados
 		return alpha
+	}
+	if excluded != NoMove {
+		return best // busca de singularidade: não grava na TT (mesma posição)
 	}
 
 	flag := ttExact
