@@ -69,10 +69,10 @@ type thread struct {
 	id      int
 	nodes   uint64
 	killers [MaxPly + 2][2]Move
-	hist    [2][64][64]int
-	capHist [12][64][6]int  // [peça][destino][vítima]
-	cont    [768][768]int16 // [peça*64+destino anterior][peça*64+destino]
-	played  [MaxPly + 2]int // peça*64+destino do lance feito em cada ply (-1 = null)
+	hist    [2][64][64]int16 // int16: a gravidade mantém em ±16384; tabelas menores cabem no cache
+	capHist [12][64][6]int16 // [peça][destino][vítima]
+	cont    [768][768]int16  // [peça*64+destino anterior][peça*64+destino]
+	played  [MaxPly + 2]int  // peça*64+destino do lance feito em cada ply (-1 = null)
 	path    []uint64
 	nn      *nnueStack
 	mbuf    [MaxPly + 2][256]Move // lista de lances de cada ply
@@ -166,7 +166,7 @@ func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
 			victim = int(p.Board[m.To()]) % 6
 		}
 		pc := int(p.Board[m.From()])
-		mvv := victim*1000 + t.capHist[pc][m.To()][victim]/8
+		mvv := victim*1000 + int(t.capHist[pc][m.To()][victim])/8
 		if p.SEE(m) >= 0 {
 			return 300_000 + mvv
 		}
@@ -188,7 +188,7 @@ func (t *thread) scoreMove(p *Position, m Move, ply int, first Move) int {
 // ser bom depois do nosso lance anterior e do lance anterior do adversário).
 func (t *thread) quietScore(p *Position, m Move, ply int) int {
 	key := int(p.Board[m.From()])*64 + m.To()
-	v := t.hist[p.Side][m.From()][m.To()]
+	v := int(t.hist[p.Side][m.From()][m.To()])
 	if ply >= 1 && t.played[ply-1] >= 0 {
 		v += int(t.cont[t.played[ply-1]][key])
 	}
@@ -196,6 +196,41 @@ func (t *thread) quietScore(p *Position, m Move, ply int) int {
 		v += int(t.cont[t.played[ply-2]][key])
 	}
 	return v
+}
+
+// scoreQuiets pontua uma lista só de lances quietos (sem promoções): killers e,
+// depois, histórico + continuação. Igual a scoreMove para esses lances, mas lê as
+// linhas da tabela de continuação uma vez por nó, não uma vez por lance.
+func (t *thread) scoreQuiets(p *Position, moves []Move, scores []int, ply int) {
+	var r1, r2 *[768]int16
+	if ply >= 1 && t.played[ply-1] >= 0 {
+		r1 = &t.cont[t.played[ply-1]]
+	}
+	if ply >= 2 && t.played[ply-2] >= 0 {
+		r2 = &t.cont[t.played[ply-2]]
+	}
+	h := &t.hist[p.Side]
+	k0, k1 := t.killers[ply][0], t.killers[ply][1]
+	for i, m := range moves {
+		switch m {
+		case k0:
+			scores[i] = 200_000
+			continue
+		case k1:
+			scores[i] = 190_000
+			continue
+		}
+		from, to := m.From(), m.To()
+		key := int(p.Board[from])*64 + to
+		v := int(h[from][to])
+		if r1 != nil {
+			v += int(r1[key])
+		}
+		if r2 != nil {
+			v += int(r2[key])
+		}
+		scores[i] = v
+	}
 }
 
 // gravity: soma o bônus mantendo o valor em [-limit, limit].
@@ -220,7 +255,7 @@ func (t *thread) updateCapture(p *Position, m Move, bonus int) {
 		victim = int(p.Board[m.To()]) % 6
 	}
 	h := &t.capHist[p.Board[m.From()]][m.To()][victim]
-	*h = gravity(*h, bonus, 16384)
+	*h = int16(gravity(int(*h), bonus, 16384))
 }
 
 // score calcula a nota de ordenação de cada lance (buffer do ply); os lances
@@ -297,7 +332,7 @@ func (t *thread) checkStop() bool {
 // updateHistory com "gravidade": mantém os valores entre -16384 e 16384.
 func (t *thread) updateHistory(side int, m Move, bonus int) {
 	h := &t.hist[side][m.From()][m.To()]
-	*h += bonus - *h*absInt(bonus)/16384
+	*h = int16(gravity(int(*h), bonus, 16384))
 }
 
 // quiesce: só capturas (ou todas as evasões, se em xeque) até a posição acalmar.

@@ -69,9 +69,7 @@ func (t *thread) nextMove(pk *picker, p *Position, ply int) Move {
 		case stQuietGen:
 			pk.quiets = p.generateQuietsInto(t.qbuf[ply][:0])
 			pk.qScores = t.qsbuf[ply][:len(pk.quiets)]
-			for i, m := range pk.quiets {
-				pk.qScores[i] = t.scoreMove(p, m, ply, NoMove)
-			}
+			t.scoreQuiets(p, pk.quiets, pk.qScores, ply)
 			pk.stage = stQuiet
 		case stQuiet:
 			for pk.qi < len(pk.quiets) {
