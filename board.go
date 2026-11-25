@@ -263,14 +263,13 @@ func (p *Position) hasNonPawn(color int) bool {
 
 // InsufficientMaterial: rei contra rei, ou rei e uma peça menor contra rei.
 func (p *Position) InsufficientMaterial() bool {
-	for c := White; c <= Black; c++ {
-		if p.Pieces[c][Pawn]|p.Pieces[c][Rook]|p.Pieces[c][Queen] != 0 {
-			return false
-		}
+	// Caminho rápido: com mais de 3 peças (reis incluídos) nunca é insuficiente.
+	if p.All.Count() > 3 {
+		return false
 	}
-	minors := 0
-	for c := White; c <= Black; c++ {
-		minors += (p.Pieces[c][Knight] | p.Pieces[c][Bishop]).Count()
+	w, k := &p.Pieces[White], &p.Pieces[Black]
+	if w[Pawn]|w[Rook]|w[Queen]|k[Pawn]|k[Rook]|k[Queen] != 0 {
+		return false
 	}
-	return minors <= 1
+	return (w[Knight] | w[Bishop] | k[Knight] | k[Bishop]).Count() <= 1
 }
