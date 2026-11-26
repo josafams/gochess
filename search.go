@@ -9,9 +9,8 @@ import (
 )
 
 const (
-	Inf    = 100000
-	Mate   = 50000
-	MaxPly = 100
+	Inf  = 100000
+	Mate = 50000
 )
 
 type Limits struct {
@@ -533,18 +532,18 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 
 	// Eval estática: reaproveita a da tabela; a nota da tabela, quando o
 	// limite aponta na direção certa, é uma estimativa ainda melhor.
-	eval, raw := -Inf, evalNone
+	ev, raw := -Inf, evalNone
 	if !inCheck {
 		if ttHit && tte.eval != evalNone {
 			raw = tte.eval
 		} else {
 			raw = t.evaluate(p, ply)
 		}
-		eval = raw
+		ev = raw
 		if ttHit && tte.score > -Mate+2*MaxPly && tte.score < Mate-2*MaxPly {
 			sc := tte.score
-			if tte.flag == ttExact || (tte.flag == ttLower && sc > eval) || (tte.flag == ttUpper && sc < eval) {
-				eval = sc
+			if tte.flag == ttExact || (tte.flag == ttLower && sc > ev) || (tte.flag == ttUpper && sc < ev) {
+				ev = sc
 			}
 		}
 	}
@@ -561,12 +560,12 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 
 	if !pvNode && !inCheck && excluded == NoMove {
 		// Reverse futility.
-		if depth <= 6 && eval-80*(depth-imp) >= beta && beta > -Mate+2*MaxPly && beta < Mate-2*MaxPly {
-			return eval
+		if depth <= 6 && ev-80*(depth-imp) >= beta && beta > -Mate+2*MaxPly && beta < Mate-2*MaxPly {
+			return ev
 		}
 		// Null move.
-		if allowNull && depth >= 3 && eval >= beta && p.hasNonPawn(p.Side) {
-			r := 3 + depth/5 + min((eval-beta)/200, 3)
+		if allowNull && depth >= 3 && ev >= beta && p.hasNonPawn(p.Side) {
+			r := 3 + depth/5 + min((ev-beta)/200, 3)
 			null := &t.stack[ply+1]
 			*null = p.MakeNull()
 			s.tt.prefetch(null.Hash)
@@ -592,7 +591,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			scores := t.score(p, caps, ply, ttMove)
 			for i := range caps {
 				m := pickNext(caps, scores, i)
-				if t.see(p, m, ply) < rbeta-eval {
+				if t.see(p, m, ply) < rbeta-ev {
 					continue
 				}
 				child := &t.stack[ply+1]
@@ -702,7 +701,7 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 
 		// Futility: lance quieto perto das folhas que não tem como subir até alfa.
 		if ply > 0 && quiet && !inCheck && !givesCheck && !isKiller && depth <= 5 &&
-			best > -Mate+2*MaxPly && eval+100+90*depth <= alpha {
+			best > -Mate+2*MaxPly && ev+100+90*depth <= alpha {
 			continue
 		}
 		searched++

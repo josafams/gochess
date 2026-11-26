@@ -160,13 +160,3 @@ func playGame(s *Searcher, r *rand.Rand, nodes uint64) []string {
 	}
 	return out
 }
-
-func countRep(hist []uint64, h uint64) int {
-	n := 0
-	for _, x := range hist {
-		if x == h {
-			n++
-		}
-	}
-	return n
-}

@@ -31,8 +31,8 @@ func TestSyzygyWDL(t *testing.T) {
 		{"4k3/8/8/8/8/8/8/3QK3 b - - 0 1", -1},
 		{"4k3/8/8/8/8/8/8/3RK3 w - - 0 1", 1},
 		{"4k3/8/8/r7/8/8/8/3RK3 w - - 0 1", 0}, // torre contra torre (conferido no python-chess)
-		{"4k3/8/8/8/8/8/8/2NNK3 w - - 0 1", 0},   // dois cavalos não dão mate forçado
-		{"7k/8/8/8/8/8/8/1BN1K3 w - - 0 1", 1},   // bispo e cavalo
+		{"4k3/8/8/8/8/8/8/2NNK3 w - - 0 1", 0}, // dois cavalos não dão mate forçado
+		{"7k/8/8/8/8/8/8/1BN1K3 w - - 0 1", 1}, // bispo e cavalo
 	}
 	s := NewSearcher(16)
 	th := s.newThread(0)

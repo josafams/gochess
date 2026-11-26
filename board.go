@@ -273,3 +273,16 @@ func (p *Position) InsufficientMaterial() bool {
 	}
 	return (w[Knight] | w[Bishop] | k[Knight] | k[Bishop]).Count() <= 1
 }
+
+// MaxPly é a profundidade máxima (em meios-lances) que a busca alcança.
+const MaxPly = 100
+
+func countRep(hist []uint64, h uint64) int {
+	n := 0
+	for _, x := range hist {
+		if x == h {
+			n++
+		}
+	}
+	return n
+}
