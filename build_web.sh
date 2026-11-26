@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 mkdir -p dist
-GOOS=js GOARCH=wasm go build -ldflags="-s -w" -o dist/gochess.wasm .
+GOOS=js GOARCH=wasm go build -ldflags="-s -w" -o dist/gochess.wasm ./cmd/gochess
 WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
 [ -f "$WASM_EXEC" ] || WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"
 cp "$WASM_EXEC" dist/wasm_exec.js
