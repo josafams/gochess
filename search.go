@@ -60,6 +60,7 @@ type Searcher struct {
 	soft       atomic.Int64 // unix nano: não começar nova iteração
 	budget     time.Duration
 	nodeLimit  uint64
+	tbHits     atomic.Uint64 // consultas às tablebases Syzygy
 	totalNodes atomic.Uint64
 }
 
@@ -439,6 +440,15 @@ func (t *thread) negamax(p *Position, depth, ply, alpha, beta int, allowNull boo
 			}
 		}
 	}
+	// Tablebases: em finais cobertos, o resultado é exato.
+	if ply > 0 {
+		if v, flag, ok := t.tbProbe(p, ply); ok {
+			if flag == ttExact || (flag == ttLower && v >= beta) || (flag == ttUpper && v <= alpha) {
+				s.tt.store(p.Hash, NoMove, scoreToTT(v, ply), min(depth+6, 250), flag, evalNone)
+				return v
+			}
+		}
+	}
 	// IIR: sem lance da tabela, reduz um pouco (ordenação será pior de qualquer jeito).
 	if ttMove == NoMove && depth >= 4 {
 		depth--
@@ -798,6 +808,7 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 		s.workers = append(s.workers, s.newThread(len(s.workers)))
 	}
 	s.totalNodes.Store(0)
+	s.tbHits.Store(0)
 	s.nodeLimit = lim.Nodes
 	s.setupTime(p, lim)
 	start := time.Now()
@@ -811,6 +822,9 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 	res := Result{}
 	if len(rootMoves) == 0 {
 		return res
+	}
+	if f := s.tbRootFilter(p, rootMoves); len(f) > 0 {
+		rootMoves = f // só lances que mantêm o resultado da tablebase
 	}
 	res.Best = rootMoves[0]
 	if e, ok := s.tt.probe(p.Hash); ok {
@@ -941,8 +955,8 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 				for _, m := range l.PV {
 					pvs += " " + m.String()
 				}
-				info(fmt.Sprintf("info depth %d multipv %d score %s nodes %d nps %d hashfull %d time %d pv%s",
-					depth, i+1, ScoreString(l.Score), res.Nodes, nps, s.tt.Hashfull(), ms, pvs))
+				info(fmt.Sprintf("info depth %d multipv %d score %s nodes %d nps %d hashfull %d tbhits %d time %d pv%s",
+					depth, i+1, ScoreString(l.Score), res.Nodes, nps, s.tt.Hashfull(), s.tbHits.Load(), ms, pvs))
 			}
 		}
 
@@ -980,8 +994,8 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 			for _, m := range res.PV {
 				pvs += " " + m.String()
 			}
-			info(fmt.Sprintf("info depth %d multipv 1 score %s nodes %d nps %d hashfull %d time %d pv%s",
-				res.Depth, ScoreString(res.Score), res.Nodes, nps, s.tt.Hashfull(), ms, pvs))
+			info(fmt.Sprintf("info depth %d multipv 1 score %s nodes %d nps %d hashfull %d tbhits %d time %d pv%s",
+				res.Depth, ScoreString(res.Score), res.Nodes, nps, s.tt.Hashfull(), s.tbHits.Load(), ms, pvs))
 		}
 	}
 	return res
