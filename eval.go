@@ -212,10 +212,10 @@ func Evaluate(p *Position) int {
 	if v, ok := evalEndgame(p); ok {
 		return v
 	}
-	return evaluate(p, nil)
+	return evaluateTrace(p, nil)
 }
 
-func evaluate(p *Position, tr *Trace) int {
+func evaluateTrace(p *Position, tr *Trace) int {
 	e := evalState{tr: tr}
 	phase := 0
 	pawnAtt := [2]Bitboard{pawnAttacksBB(White, p.Pieces[White][Pawn]), pawnAttacksBB(Black, p.Pieces[Black][Pawn])}

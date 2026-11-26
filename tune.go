@@ -55,7 +55,7 @@ func loadTuneData(path string, lambda float64) ([]tuneEntry, error) {
 		score, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
 		result, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
 		tr := &Trace{coef: map[int]int{}}
-		evaluate(p, tr)
+		evaluateTrace(p, tr)
 		e := tuneEntry{
 			phase:  float32(tr.phase) / 24,
 			scale:  float32(tr.scale) / 128,
