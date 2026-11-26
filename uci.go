@@ -130,6 +130,7 @@ func uciLoop() {
 			say("option name OwnBook type check default true")
 			say("option name UseNNUE type check default false")
 			say("option name EvalFile type string default <empty>")
+			say("option name SyzygyPath type string default <empty>")
 			say("uciok")
 		case "setoption":
 			// setoption name <nome> value <valor>
@@ -166,6 +167,16 @@ func uciLoop() {
 				}
 				currentNet, s.UseNNUE = net, true
 				say("info string rede NNUE carregada de " + value)
+			case "syzygypath":
+				if !tbSupported() {
+					say("info string esta build não tem suporte a Syzygy (compile com cgo)")
+					continue
+				}
+				if n := setSyzygyPath(value); n > 0 {
+					say(fmt.Sprintf("info string Syzygy: tablebases de até %d peças carregadas", n))
+				} else {
+					say("info string Syzygy: nenhuma tablebase encontrada em " + value)
+				}
 			case "usennue":
 				s.UseNNUE = value == "true"
 				if s.UseNNUE && currentNet == nil {
