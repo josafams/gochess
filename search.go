@@ -54,13 +54,19 @@ type Searcher struct {
 	UseNNUE bool
 	workers []*thread
 
-	stop       atomic.Bool
-	timed      atomic.Bool
-	deadline   atomic.Int64 // unix nano: limite duro
-	soft       atomic.Int64 // unix nano: não começar nova iteração
-	budget     time.Duration
-	nodeLimit  uint64
-	totalNodes atomic.Uint64
+	stop     atomic.Bool
+	timed    atomic.Bool
+	deadline atomic.Int64 // unix nano: limite duro
+	soft     atomic.Int64 // unix nano: não começar nova iteração
+	budget   time.Duration
+	// Gestão de tempo com relógio: o tempo "ideal" (softBase) é ajustado a
+	// cada iteração pela estabilidade do melhor lance e pela queda da nota.
+	clockMode   bool
+	softBase    time.Duration
+	maxTime     time.Duration
+	searchStart atomic.Int64 // unix nano
+	nodeLimit   uint64
+	totalNodes  atomic.Uint64
 }
 
 // thread guarda o estado de cada thread de busca (Lazy SMP).
@@ -108,7 +114,8 @@ func (s *Searcher) ResetStop() { s.stop.Store(false) }
 func (s *Searcher) PonderHit() {
 	now := time.Now()
 	if s.budget > 0 {
-		s.deadline.Store(now.Add(s.budget).UnixNano())
+		s.searchStart.Store(now.UnixNano())
+		s.deadline.Store(now.Add(s.hardBudget()).UnixNano())
 		s.soft.Store(now.Add(s.budget / 2).UnixNano())
 		s.timed.Store(true)
 	}
@@ -820,10 +827,30 @@ func (t *thread) searchRoot(p *Position, moves []Move, depth, alpha, beta int) (
 	return best, bestMove
 }
 
+// hardBudget: com relógio, o limite duro é maior que o ideal; com movetime, é o próprio.
+func (s *Searcher) hardBudget() time.Duration {
+	if s.clockMode && s.maxTime > 0 {
+		return s.maxTime
+	}
+	return s.budget
+}
+
+// timeScale: quanto do tempo ideal usar, conforme a estabilidade do melhor
+// lance (iterações seguidas sem mudar) e a queda da nota desde a anterior.
+func timeScale(stability, drop int) float64 {
+	scale := [...]float64{1.6, 1.25, 1.0, 0.85, 0.75, 0.65}[min(stability, 5)]
+	if drop > 0 {
+		scale *= 1 + float64(min(drop, 150))/200
+	}
+	return scale
+}
+
 func (s *Searcher) setupTime(p *Position, lim Limits) {
 	now := time.Now()
 	s.timed.Store(false)
 	s.budget = 0
+	s.clockMode = false
+	s.maxTime = 0
 	switch {
 	case lim.MoveTime > 0:
 		s.budget = lim.MoveTime
@@ -844,9 +871,15 @@ func (s *Searcher) setupTime(p *Position, lim Limits) {
 			budget = max(left-50*time.Millisecond, 5*time.Millisecond)
 		}
 		s.budget = budget
+		s.clockMode = true
+		s.softBase = budget / 2
+		// Limite duro: pode passar do ideal quando a posição pede, mas nunca
+		// mais que 1/4 do que resta (nem chegar perto de zerar o relógio).
+		s.maxTime = min(budget*3, max(left/4, budget), max(left-50*time.Millisecond, 5*time.Millisecond))
 	}
 	if s.budget > 0 && !lim.Infinite && !lim.Ponder {
-		s.deadline.Store(now.Add(s.budget).UnixNano())
+		s.searchStart.Store(now.UnixNano())
+		s.deadline.Store(now.Add(s.hardBudget()).UnixNano())
 		if lim.MoveTime > 0 {
 			s.soft.Store(now.Add(s.budget).UnixNano())
 		} else {
@@ -977,6 +1010,7 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 
 	multiPV := max(1, min(s.MultiPV, len(rootMoves)))
 	prevScore := 0
+	stability := 0    // iterações seguidas com o mesmo melhor lance
 	partialScore := 0 // nota do melhor lance achado numa iteração interrompida
 	prevLines := []Line{}
 
@@ -1040,6 +1074,15 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 			break
 		}
 
+		if len(prevLines) > 0 && lines[0].Move == prevLines[0].Move {
+			stability++
+		} else {
+			stability = 0
+		}
+		drop := 0
+		if depth >= 4 {
+			drop = prevScore - lines[0].Score
+		}
 		prevLines = lines
 		prevScore = lines[0].Score
 		res.Best, res.Score, res.Depth = lines[0].Move, lines[0].Score, depth
@@ -1065,8 +1108,16 @@ func (s *Searcher) Search(p *Position, path []uint64, lim Limits, info func(stri
 		if lim.Mate > 0 && res.Score > Mate-2*MaxPly && (Mate-res.Score+1)/2 <= lim.Mate {
 			break
 		}
-		if s.timed.Load() && time.Now().UnixNano() > s.soft.Load() {
-			break
+		if s.timed.Load() {
+			now := time.Now().UnixNano()
+			if s.clockMode {
+				limit := s.searchStart.Load() + int64(float64(s.softBase)*timeScale(stability, drop))
+				if now > limit {
+					break
+				}
+			} else if now > s.soft.Load() {
+				break
+			}
 		}
 		if !lim.Infinite && !lim.Ponder && lim.Mate == 0 && res.Score > Mate-2*MaxPly && depth > 2*(Mate-res.Score)+4 {
 			break
